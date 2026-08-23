@@ -364,12 +364,11 @@ export default function (pi: ExtensionAPI): void {
 		description: "Open the tasks panel (goal, phases, inline actions)",
 		handler: async (_args, cmdCtx) => {
 			uiHost = cmdCtx;
-			cmdCtx.cwd = cmdCtx.cwd ?? process.cwd();
 			if (cmdCtx.mode === "tui" && cmdCtx.hasUI) {
 				const { makeDashboardComponent } = await import("./dashboard.ts");
 				await cmdCtx.ui.custom<null>(
 					(tui, theme, _keybindings, done) =>
-						makeDashboardComponent({ dataDir, cwd: cmdCtx.cwd! }, tui, theme as unknown as ThemeLike, () => done(null)),
+					makeDashboardComponent({ dataDir, cwd: cmdCtx.cwd }, tui, theme as unknown as ThemeLike, () => done(null)),
 				);
 				updateUI();
 				return;
@@ -390,7 +389,6 @@ export default function (pi: ExtensionAPI): void {
 
 	pi.on("session_start", (_event, eventCtx) => {
 		uiHost = eventCtx;
-		eventCtx.cwd = eventCtx.cwd ?? process.cwd();
 		updateUI();
 	});
 
