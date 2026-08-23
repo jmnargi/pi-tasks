@@ -20,6 +20,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 
 import {
 	evaluateNudge,
+	formatNudgeText,
 	buildPlanAppendix,
 	newNudgeState,
 	recordAgentActivity,
@@ -363,7 +364,10 @@ export default function (pi: ExtensionAPI): void {
 			return;
 		}
 		try {
-			pi.sendMessage(decision.message, { triggerTurn: true, deliverAs: "steer" });
+			// Deliver as a real user message through the prompt flow — the same
+			// path as the human typing it — so the model reliably starts a new
+			// turn and treats the reminder as instruction, not ambient noise.
+			void pi.sendUserMessage(formatNudgeText(plan!), { deliverAs: "followUp" });
 			recordNudge(nudge, Date.now());
 			updateUI();
 		} catch (err) {

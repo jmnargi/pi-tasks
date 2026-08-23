@@ -48,6 +48,7 @@ function makeFakePi(): FakePi {
 		},
 		registerMessageRenderer: (customType: string, _r: unknown) => renderers.push(customType),
 		sendMessage: (m: unknown) => sent.push(m),
+		sendUserMessage: (content: unknown) => sent.push(content),
 	} as unknown as ExtensionAPI;
 	return {
 		pi: surface,
@@ -113,7 +114,7 @@ describe("nudge flow (agent_settled fired)", () => {
 		fake.sent.length = 0;
 	}
 
-	test("settling with open items sends a nudge message", async () => {
+	test("settling with open items sends a user message nudge", async () => {
 		const fake = makeFakePi();
 		makeTasks(fake.pi);
 		const cwd = path.join(tmp, "proj-a");
@@ -123,9 +124,26 @@ describe("nudge flow (agent_settled fired)", () => {
 		fake.fire("message_end", { message: { role: "assistant", content: "working…" } });
 		fake.fire("agent_settled", {}, { cwd });
 		expect(fake.sent).toHaveLength(1);
-		const msg = fake.sent[0] as { customType: string; details: { open: number } };
-		expect(msg.customType).toBe("tasks-nudge");
-		expect(msg.details.open).toBe(2);
+		const text = fake.sent[0] as string;
+		expect(typeof text).toBe("string");
+		expect(text).toContain("NOT complete");
+		expect(text).toContain("2 task"); // open count
+		expect(text).toContain("Ship it"); // goal
+	});
+
+	test("model answering then stopping again re-nudges after cooldown", async () => {
+		const fake = makeFakePi();
+		makeTasks(fake.pi);
+		const cwd = path.join(tmp, "proj-a2");
+		fs.mkdirSync(cwd, { recursive: true });
+		await initPlanFor(fake, cwd);
+		fake.fire("message_end", { message: { role: "assistant", content: "working…" } });
+		fake.fire("agent_settled", {}, { cwd });
+		expect(fake.sent).toHaveLength(1);
+		// Model answers again and stops — but within the 60s cooldown → silent.
+		fake.fire("message_end", { message: { role: "assistant", content: "more" } });
+		fake.fire("agent_settled", {}, { cwd });
+		expect(fake.sent).toHaveLength(1);
 	});
 
 	test("settling with all items done does not send anything", async () => {

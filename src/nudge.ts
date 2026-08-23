@@ -141,8 +141,28 @@ export function recordEscalation(state: NudgeState): void {
 }
 
 /**
- * Shape the nudge message payload. The content tells the model exactly what
- * is open and what to do next; the renderer shows it as a distinct block.
+ * Shape the reminder text. This becomes a USER message via sendUserMessage —
+ * the strongest signal available: it enters the conversation exactly like the
+ * human typing it, so even a weak model treats it as instruction, not noise.
+ */
+export function formatNudgeText(plan: Plan): string {
+	const open = openCount(plan);
+	const next = nextOpenItem(plan);
+	return [
+		`[tasks] You stopped your turn, but the work is NOT complete: ${open} task${open === 1 ? "" : "s"} still open and the goal is not done.`,
+		`Goal: ${plan.goal}`,
+		next ? `Current task: "${next.item.text}" (${next.phase})` : "",
+		"Keep working on the plan now. Do not stop until every item is closed (tasks op=done/drop/block) or the goal is achieved. Do not reply to this message — just continue the work.",
+		"",
+		renderPlan(plan),
+	]
+		.filter(Boolean)
+		.join("\n");
+}
+
+/**
+ * Legacy/custom-renderer payload (kept for the tasks-nudge renderer used in
+ * contexts that cannot take user messages).
  */
 export function formatNudgeMessage(plan: Plan): {
 	customType: string;
@@ -154,16 +174,7 @@ export function formatNudgeMessage(plan: Plan): {
 	const next = nextOpenItem(plan);
 	return {
 		customType: NUDGE_CUSTOM_TYPE,
-		content: [
-			`You stopped with ${open} open task${open === 1 ? "" : "s"}.`,
-			`Goal: ${plan.goal}`,
-			next ? `Next: "${next.item.text}" (${next.phase})` : "",
-			"Continue working or explicitly mark tasks done/dropped/blocked before stopping.",
-			"",
-			renderPlan(plan),
-		]
-			.filter(Boolean)
-			.join("\n"),
+		content: formatNudgeText(plan),
 		display: true,
 		details: { open, goal: plan.goal, next: next?.item.text ?? "" },
 	};

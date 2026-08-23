@@ -9,8 +9,9 @@ import {
 	MAX_CONSECUTIVE_NUDGES,
 	NUDGE_CUSTOM_TYPE,
 	buildPlanAppendix,
-	formatNudgeMessage,
 	newNudgeState,
+	formatNudgeMessage,
+	formatNudgeText,
 	recordAgentActivity,
 	recordEscalation,
 	recordNudge,
@@ -107,15 +108,23 @@ describe("nudge exhaustion (evaluateNudge)", () => {
 });
 
 describe("formatNudgeMessage", () => {
-	test("shapes a turn-triggering custom message with plan context", () => {
+	test("shapes the reminder payload with goal-incomplete framing", () => {
 		const m = formatNudgeMessage(plan());
 		expect(m.customType).toBe(NUDGE_CUSTOM_TYPE);
 		expect(m.display).toBe(true);
 		expect(m.details.open).toBe(2);
 		expect(m.details.next).toBe("a");
+		expect(m.content).toContain("NOT complete");
 		expect(m.content).toContain("Goal: Ship");
-		expect(m.content).toContain("2 open task");
 		expect(m.content).toContain("[ ] b");
+	});
+
+	test("formatNudgeText is user-message prose with plan", () => {
+		const text = formatNudgeText(plan());
+		expect(text).toContain("[tasks] You stopped your turn");
+		expect(text).toContain("2 tasks still open");
+		expect(text).toContain('Current task: "a"');
+		expect(text).toContain("Do not reply to this message");
 	});
 });
 
