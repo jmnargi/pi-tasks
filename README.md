@@ -47,6 +47,14 @@ plan. A 60s cooldown + "agent acted since last nudge" gate prevents a
 nudge→turn→settle→nudge token loop. Closing every item (done/drop/block)
 stops the nudges.
 
+### System-prompt appendix
+
+While a plan is active, `before_agent_start` appends a short `[tasks]` block
+to the system prompt (goal, open count, current item, and a reminder to keep
+the list updated via the `tasks` tool). It appears only when a plan exists,
+so it costs nothing when there is no active work, and it keeps even weak
+models continuously aware that a goal + checklist is in flight.
+
 ## Human-facing
 
 - `/tasks` — show the current project's plan as a notification.

@@ -1,17 +1,39 @@
 /**
- * src/nudge.ts — pure nudge decisioning + message shaping.
+ * src/nudge.ts — pure nudge decisioning + message shaping + prompt appendix.
  *
  * When the agent settles (stops) with open tasks, the extension sends a
  * turn-triggering custom message so even a weak model cannot miss that work
  * is outstanding. A cooldown prevents a nudge→turn→settle→nudge loop from
  * burning tokens: we only nudge again after the agent has actually done a
  * turn since the last nudge.
+ *
+ * The prompt appendix is a short system-prompt block appended (via
+ * before_agent_start) only while a plan is active, so the model is
+ * continuously reminded to keep the todo list updated.
  */
 
 import { nextOpenItem, openCount, renderPlan, type Plan } from "./store.ts";
 
 /** The pi customType used for nudge messages (matches the renderer). */
 export const NUDGE_CUSTOM_TYPE = "tasks-nudge";
+
+/**
+ * Short block appended to the system prompt while a plan is active. Kept
+ * small (a few lines) so the per-turn token cost stays negligible.
+ */
+export function buildPlanAppendix(plan: Plan): string {
+	const open = openCount(plan);
+	const next = nextOpenItem(plan);
+	const lines = [
+		"[tasks] You have an active goal + todo plan for this project.",
+		`[tasks] Goal: ${plan.goal} (${open} open item${open === 1 ? "" : "s"})`,
+	];
+	if (next) lines.push(`[tasks] Current: "${next.item.text}" (${next.phase})`);
+	lines.push(
+		"[tasks] Keep it updated as you work: tasks op=done / start / drop / block / append. Call tasks op=view to see the full plan. You will be nudged if you stop with open items.",
+	);
+	return lines.join("\n");
+}
 
 export interface NudgeState {
 	lastNudgeAt: number;

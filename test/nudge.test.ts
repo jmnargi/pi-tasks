@@ -6,6 +6,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
 	NUDGE_CUSTOM_TYPE,
+	buildPlanAppendix,
 	formatNudgeMessage,
 	newNudgeState,
 	recordAgentActivity,
@@ -63,5 +64,19 @@ describe("formatNudgeMessage", () => {
 		expect(m.content).toContain("Goal: Ship");
 		expect(m.content).toContain("2 open task");
 		expect(m.content).toContain("[ ] b");
+	});
+});
+
+describe("buildPlanAppendix", () => {
+	test("includes goal, open count, and current item", () => {
+		const text = buildPlanAppendix(plan());
+		expect(text).toContain("active goal + todo plan");
+		expect(text).toContain("Goal: Ship (2 open items)");
+		expect(text).toContain('Current: "a"');
+		expect(text).toContain("op=view");
+	});
+
+	test("mentions nudging so the model keeps the list updated", () => {
+		expect(buildPlanAppendix(plan())).toContain("nudged if you stop with open items");
 	});
 });

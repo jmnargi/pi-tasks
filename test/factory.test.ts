@@ -81,6 +81,7 @@ describe("extension factory surface", () => {
 		expect(fake.renderers).toContain("tasks-nudge");
 		expect(fake.events).toContain("agent_settled");
 		expect(fake.events).toContain("message_end");
+		expect(fake.events).toContain("before_agent_start");
 		expect(fake.events).toContain("session_start");
 		expect(fake.events).toContain("session_shutdown");
 	});

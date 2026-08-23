@@ -15,6 +15,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 
 import {
 	NUDGE_CUSTOM_TYPE,
+	buildPlanAppendix,
 	formatNudgeMessage,
 	newNudgeState,
 	recordAgentActivity,
@@ -64,37 +65,43 @@ export default function (pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "tasks",
 		label: "Tasks",
-		promptSnippet: "Track the goal + todo list: init a plan, mark items done/started/blocked as you work",
+		promptSnippet: "Track the active goal + todo list: init a plan when starting work, update items as you go (done/start/drop/block)",
 		promptGuidelines: [
-			"tasks: init a goal + checklist at the start of substantial work; keep items as short verbatim actions (what, not how).",
-			"tasks: mark each item done as you finish it, drop items you decide not to do, block items waiting on something, and start the item you are working on.",
-			"tasks: you will be nudged if you stop with open items — before stopping, finish the goal or explicitly close every item.",
+			"tasks: always call tasks op=init with a goal + todos before starting substantial multi-step work — it keeps you and the user aligned on what is left.",
+			"tasks: keep items as short verbatim actions (what, not how); address them by their EXACT text.",
+			"tasks: update the list as you work — mark done the item you just finished, start the item you are working on, drop items you will not do, block items waiting on something (with a reason).",
+			"tasks: call tasks op=view whenever you need the current state; the plan persists across turns and sessions.",
+			"tasks: you WILL be nudged if you stop while items are open — before stopping, finish the goal or explicitly close every open item (done/drop/block).",
 		],
 		description: [
 			"Goal + todo tracking for the current work. The plan persists per project across sessions.",
-			"init creates a plan (goal + checklist). Then start/done/drop/block/unblock/append mutate items by their exact text.",
-			"view renders the current plan. Completing an item auto-promotes the next open one.",
+			"Workflow: op=init (goal + checklist) → as you work, op=start the current item, op=done when finished, op=drop for abandoned items, op=block (with reason) for blocked ones, op=append to add more, op=view to see the plan.",
+			"Items are addressed by their EXACT text — copy the item text verbatim from the most recent view; do not paraphrase.",
+			"Completing an item auto-promotes the next open one as the active item. op=clear deletes the plan.",
 			"You will be nudged (an injected message) if you stop while items remain open.",
 		].join(" "),
 		parameters: Type.Object({
 			op: StringEnum(
 				["init", "view", "start", "done", "drop", "block", "unblock", "append", "clear"] as const,
-				{ description: "Operation to perform" },
+				{
+					description:
+						"Operation: init=create plan; view=show plan; start=mark item as the one being worked on; done=mark finished; drop=abandon; block=waiting (needs reason); unblock=re-open; append=add items; clear=delete plan",
+				},
 			),
-			goal: Type.Optional(Type.String({ description: "The goal statement (init)" })),
-			todos: Type.Optional(Type.Array(Type.String({ description: "Checklist items (init/append)" }))),
+			goal: Type.Optional(Type.String({ description: "The goal statement, one sentence (op=init)" })),
+			todos: Type.Optional(Type.Array(Type.String({ description: "Checklist items, short verbatim actions (op=init / op=append)" }))),
 			phases: Type.Optional(
 				Type.Array(
 					Type.Object({
-						name: Type.String({ description: "Phase name" }),
+						name: Type.String({ description: "Phase name (e.g. 'Build', 'Verify')" }),
 						items: Type.Array(Type.String({ description: "Checklist items in this phase" })),
 					}),
-					{ description: "Phase-grouped checklist (init; wins over todos)" },
+					{ description: "Phase-grouped checklist (op=init; wins over todos when provided)" },
 				),
 			),
-			phase: Type.Optional(Type.String({ description: "Phase name to append to (append; default first phase)" })),
-			task: Type.Optional(Type.String({ description: "Exact item text to start/done/drop/block/unblock" })),
-			reason: Type.Optional(Type.String({ description: "Block reason (block)" })),
+			phase: Type.Optional(Type.String({ description: "Phase to append into (op=append; default: first phase)" })),
+			task: Type.Optional(Type.String({ description: "The EXACT item text to start/done/drop/block/unblock — copy it verbatim from op=view" })),
+			reason: Type.Optional(Type.String({ description: "Why the item is blocked (op=block)" })),
 		}),
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -187,6 +194,14 @@ export default function (pi: ExtensionAPI): void {
 	// ------------------------------------------------------------------
 	// Nudge: agent_settled + message_end
 	// ------------------------------------------------------------------
+
+	pi.on("before_agent_start", (event, ctx) => {
+		const plan = loadFor(ctx.cwd ?? process.cwd());
+		if (!plan) return;
+		return {
+			systemPrompt: `${event.systemPrompt}\n\n${buildPlanAppendix(plan)}`,
+		};
+	});
 
 	pi.on("message_end", (event) => {
 		if (event.message?.role === "assistant") recordAgentActivity(nudge);
