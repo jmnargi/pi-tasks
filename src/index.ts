@@ -29,7 +29,10 @@ import {
 	NUDGE_CUSTOM_TYPE,
 	type NudgeState,
 } from "./nudge.ts";
-import { clearPlan, loadPlan, projectKey, savePlan } from "./persistence.ts";
+import { clearPlan, loadPlan, planKey, projectKey, savePlan } from "./persistence.ts";
+import { makeDashboardComponent } from "./dashboard.ts";
+
+
 import {
 	appendTasks,
 	initPlan,
@@ -79,13 +82,33 @@ export default function (pi: ExtensionAPI): void {
 		  }
 		| undefined = undefined;
 
-	const loadFor = (cwd: string | undefined): Plan | null => loadPlan(dataDir, cwd ?? process.cwd());
+	/**
+	 * Storage key of the active plan: the pi session id when available
+	 * (stable across resume/restart — read back from the session header),
+	 * else a project-path fallback. Every context-bearing callback refreshes
+	 * this so switching sessions switches plans.
+	 */
+	let activeKey = planKey(undefined, process.cwd());
+
+	const syncKey = (ctx: { cwd?: string; sessionManager?: { getSessionId(): string } } | undefined): string => {
+		const cwd = ctx?.cwd ?? process.cwd();
+		let sid: string | undefined;
+		try {
+			sid = ctx?.sessionManager?.getSessionId() || undefined;
+		} catch {
+			sid = undefined;
+		}
+		activeKey = planKey(sid, cwd);
+		return activeKey;
+	};
+
+	const loadFor = (): Plan | null => loadPlan(dataDir, activeKey);
 
 	const updateUI = (): void => {
 		const ctx = uiHost;
 		if (!ctx?.hasUI) return;
 		try {
-			const plan = loadFor(ctx.cwd);
+			const plan = loadFor();
 			const key = "tasks";
 			if (!plan || openCount(plan) === 0) {
 				ctx.ui.setStatus(key, undefined);
@@ -172,7 +195,7 @@ export default function (pi: ExtensionAPI): void {
 		renderResult(result, options, theme, context) {
 			const details = result.details as TasksDetails | undefined;
 			if (options.expanded) {
-				const plan = loadFor(context.cwd);
+				const plan = (syncKey(context), loadFor());
 				if (plan) {
 					const body = ["", ...renderPlanThemed(plan, theme)].map((l) => l).join("\n");
 					return lineComponent(body, context);
@@ -199,6 +222,7 @@ export default function (pi: ExtensionAPI): void {
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const cwd = ctx.cwd ?? process.cwd();
+			const key = syncKey(ctx);
 			const now = Date.now();
 			const requireTask = (): string => {
 				const t = params.task ?? "";
@@ -217,7 +241,7 @@ export default function (pi: ExtensionAPI): void {
 				case "init": {
 					const goal = (params.goal ?? "").trim();
 					if (goal === "") throw new Error("goal is required for init");
-					const existing = loadPlan(dataDir, cwd);
+					const existing = loadPlan(dataDir, key);
 					if (existing && openCount(existing) > 0 && params.replace !== true) {
 						throw new Error(
 							`an active plan already exists ("${existing.goal}", ${openCount(existing)} open). Finish it, op=clear, or pass replace=true to discard it`,
@@ -225,7 +249,7 @@ export default function (pi: ExtensionAPI): void {
 					}
 					let p: Plan;
 					try {
-						p = initPlan({ goal, project: projectKey(cwd), todos: params.todos, phases: params.phases, now });
+						p = initPlan({ goal, project: key, todos: params.todos, phases: params.phases, now });
 					} catch (err) {
 						throw new Error(err instanceof Error ? err.message : String(err));
 					}
@@ -233,7 +257,7 @@ export default function (pi: ExtensionAPI): void {
 					return persistAndRender(p);
 				}
 				case "view": {
-					const p = loadPlan(dataDir, cwd);
+					const p = loadPlan(dataDir, key);
 					if (!p)
 						return {
 							content: [{ type: "text" as const, text: "no plan yet — call tasks op=init with a goal and todos" }],
@@ -243,37 +267,37 @@ export default function (pi: ExtensionAPI): void {
 					return { content: [{ type: "text" as const, text: renderPlan(p) }], details: detailsOf(p) };
 				}
 				case "start": {
-					const p = needPlan(cwd);
+					const p = needPlan();
 					const r = markStarted(p, requireTask(), now);
 					if (!r.ok) throw new Error(r.error);
 					return persistAndRender(p);
 				}
 				case "done": {
-					const p = needPlan(cwd);
+					const p = needPlan();
 					const r = markDone(p, requireTask(), now);
 					if (!r.ok) throw new Error(r.error);
 					return persistAndRender(p);
 				}
 				case "drop": {
-					const p = needPlan(cwd);
+					const p = needPlan();
 					const r = markDropped(p, requireTask(), now);
 					if (!r.ok) throw new Error(r.error);
 					return persistAndRender(p);
 				}
 				case "block": {
-					const p = needPlan(cwd);
+					const p = needPlan();
 					const r = markBlocked(p, requireTask(), params.reason ?? "", now);
 					if (!r.ok) throw new Error(r.error);
 					return persistAndRender(p);
 				}
 				case "unblock": {
-					const p = needPlan(cwd);
+					const p = needPlan();
 					const r = unblock(p, requireTask(), now);
 					if (!r.ok) throw new Error(r.error);
 					return persistAndRender(p);
 				}
 				case "append": {
-					const p = needPlan(cwd);
+					const p = needPlan();
 					const todos = params.todos ?? [];
 					if (todos.length === 0) throw new Error("todos is required for append");
 					const r = appendTasks(p, todos, params.phase, now);
@@ -281,7 +305,7 @@ export default function (pi: ExtensionAPI): void {
 					return persistAndRender(p);
 				}
 				case "clear": {
-					const removed = clearPlan(dataDir, cwd);
+					const removed = clearPlan(dataDir, key);
 					resetNudges();
 					updateUI();
 					return {
@@ -293,8 +317,8 @@ export default function (pi: ExtensionAPI): void {
 		},
 	});
 
-	function needPlan(cwd: string): Plan {
-		const p = loadPlan(dataDir, cwd);
+	function needPlan(): Plan {
+		const p = loadPlan(dataDir, activeKey);
 		if (!p) throw new Error("no plan yet — call tasks op=init with a goal and todos first");
 		return p;
 	}
@@ -316,7 +340,8 @@ export default function (pi: ExtensionAPI): void {
 	// ------------------------------------------------------------------
 
 	pi.on("before_agent_start", (event, ctx) => {
-		const plan = loadFor(ctx.cwd ?? process.cwd());
+		syncKey(ctx);
+		const plan = loadFor();
 		if (!plan) return;
 		return {
 			systemPrompt: `${event.systemPrompt}\n\n${buildPlanAppendix(plan)}`,
@@ -328,7 +353,7 @@ export default function (pi: ExtensionAPI): void {
 	});
 
 	pi.on("agent_settled", (_event, ctx) => {
-		const plan = loadFor(ctx?.cwd ?? process.cwd());
+		const plan = (syncKey(ctx), loadFor());
 		recordProgress(nudge, plan);
 		const decision = evaluateNudge(nudge, plan, Date.now());
 		if (decision.action === "none") return;
@@ -364,16 +389,16 @@ export default function (pi: ExtensionAPI): void {
 		description: "Open the tasks panel (goal, phases, inline actions)",
 		handler: async (_args, cmdCtx) => {
 			uiHost = cmdCtx;
+			const key = syncKey(cmdCtx);
 			if (cmdCtx.mode === "tui" && cmdCtx.hasUI) {
-				const { makeDashboardComponent } = await import("./dashboard.ts");
 				await cmdCtx.ui.custom<null>(
 					(tui, theme, _keybindings, done) =>
-					makeDashboardComponent({ dataDir, cwd: cmdCtx.cwd }, tui, theme as unknown as ThemeLike, () => done(null)),
+						makeDashboardComponent({ dataDir, planKey: key }, tui, theme as unknown as ThemeLike, () => done(null)),
 				);
 				updateUI();
 				return;
 			}
-			const plan = loadFor(cmdCtx.cwd);
+			const plan = loadFor();
 			updateUI();
 			if (!plan) {
 				if (cmdCtx.hasUI) cmdCtx.ui.notify("tasks: no plan yet — ask the model to init one", "info");
@@ -389,6 +414,8 @@ export default function (pi: ExtensionAPI): void {
 
 	pi.on("session_start", (_event, eventCtx) => {
 		uiHost = eventCtx;
+		resetNudges(); // a different session must not inherit this session's nudge history
+		syncKey(eventCtx);
 		updateUI();
 	});
 

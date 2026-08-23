@@ -5,6 +5,12 @@
  * that owns keyboard focus until esc. Pure rendering lives in ui.ts; this file
  * wires it to the TUI with selection and inline actions.
  *
+ * FLICKER NOTE: render() must never touch the filesystem or recompute
+ * anything expensive — pi calls it on every streaming delta (up to ~60fps)
+ * and its differential renderer repaints whatever changed. The plan is read
+ * once at construction and cached; mutations update the cache in place and
+ * persist to disk from the input handler (never inside render()).
+ *
  * Keys:
  *   ↑/↓   move selection
  *   enter start the selected item (marks it in_progress)
@@ -14,18 +20,17 @@
  *   esc/q close
  */
 
-
 import { Key, matchesKey, truncateToWidth, type Component, type TUI } from "@earendil-works/pi-tui";
 
 import { loadPlan, savePlan } from "./persistence.ts";
 import { markBlocked, markDone, markStarted, type Plan } from "./store.ts";
-import { renderPlanThemed, statusToken, type ThemeLike } from "./ui.ts";
+import { planStats, progressBar, itemLine, statusToken, type ThemeLike } from "./ui.ts";
 
 export interface DashboardDeps {
 	/** Data dir for load/save. */
 	dataDir: string;
-	/** Working directory whose plan is shown. */
-	cwd: string;
+	/** Storage key of the plan shown (session-scoped). */
+	planKey: string;
 }
 
 /** One selectable row: an item identified by phase + verbatim text. */
@@ -49,6 +54,8 @@ export function makeDashboardComponent(
 	theme: ThemeLike,
 	done: () => void,
 ): Component & { dispose(): void } {
+	// Cached state — render() only reads these.
+	let plan: Plan | null = loadPlan(deps.dataDir, deps.planKey);
 	let selected = 0;
 	let notice = "";
 	let inputMode: null | { buffer: string } = null;
@@ -61,32 +68,34 @@ export function makeDashboardComponent(
 		}
 	};
 
+	const clampSelected = (): void => {
+		const n = plan ? rowsOf(plan).length : 0;
+		if (selected >= n) selected = Math.max(0, n - 1);
+	};
+
+	const selectedRow = (): Row | null => {
+		if (!plan) return null;
+		return rowsOf(plan)[selected] ?? null;
+	};
+
 	const mutate = (fn: (p: Plan) => { ok: true } | { ok: false; error: string }): void => {
-		const plan = loadPlan(deps.dataDir, deps.cwd);
 		if (!plan) return;
 		const r = fn(plan);
 		if (r.ok) {
-			savePlan(deps.dataDir, plan);
-			notice = "";
+			try {
+				savePlan(deps.dataDir, plan);
+				notice = "";
+			} catch {
+				notice = "failed to save plan";
+			}
+			clampSelected();
 		} else {
 			notice = r.error;
 		}
 		refresh();
 	};
 
-	const clampSelected = (): void => {
-		const plan = loadPlan(deps.dataDir, deps.cwd);
-		const n = plan ? rowsOf(plan).length : 0;
-		if (selected >= n) selected = Math.max(0, n - 1);
-	};
-
-	const selectedRow = (): Row | null => {
-		const plan = loadPlan(deps.dataDir, deps.cwd);
-		if (!plan) return null;
-		const rows = rowsOf(plan);
-		return rows[selected] ?? null;
-	};
-
+	/** Pure rendering from cached state — no IO, no recomputation of data. */
 	const contentLines = (width: number): string[] => {
 		if (inputMode !== null) {
 			return [
@@ -96,26 +105,39 @@ export function makeDashboardComponent(
 				),
 			];
 		}
-		const plan = loadPlan(deps.dataDir, deps.cwd);
 		if (!plan) {
 			return [
-				truncateToWidth(`${theme.fg("accent", theme.bold("tasks"))} ${theme.fg("dim", "no plan for this project")}`, width),
+				truncateToWidth(`${theme.fg("accent", theme.bold("tasks"))} ${theme.fg("dim", "no plan for this session")}`, width),
 				"",
 				theme.fg("dim", "ask the model to create one: tasks op=init …"),
+				"",
+				theme.fg("dim", "esc close"),
 			];
 		}
-		const out: string[] = [];
-		for (const line of renderPlanThemed(plan, theme)) out.push(truncateToWidth(line, width));
 
-		// Selection footer over item rows.
+		const out: string[] = [];
+		const s = planStats(plan);
+		out.push(truncateToWidth(theme.fg("accent", theme.bold(`◈ ${plan.goal}`)), width));
+		out.push(truncateToWidth(theme.fg("muted", `${progressBar(s.done, s.total)} ${s.done}/${s.total} · ${s.open} open`), width));
+
 		const rows = rowsOf(plan);
-		out.push("");
-		clampSelected();
-		if (rows.length > 0) {
-			const sel = rows[selected]!;
-			const token = statusToken(sel.status as Parameters<typeof statusToken>[0]);
-			out.push(truncateToWidth(`${theme.fg(token, "›")} ${sel.text} ${theme.fg("dim", `(${sel.phase})`)}`, width));
+		let rowIndex = 0;
+		for (const phase of plan.phases) {
+			if (phase.items.length === 0) continue;
+			out.push("");
+			out.push(truncateToWidth(theme.fg("dim", theme.bold(phase.name.toUpperCase())), width));
+			for (const item of phase.items) {
+				const line = itemLine(item, theme);
+				if (rowIndex === selected && inputMode === null) {
+					const cursor = theme.fg(statusToken(item.status), "› ");
+					out.push(truncateToWidth(cursor + line + theme.fg("dim", `  [${phase.name}]`), width));
+				} else {
+					out.push(truncateToWidth(`  ${line}`, width));
+				}
+				rowIndex++;
+			}
 		}
+		out.push("");
 		if (notice) out.push(theme.fg("warning", truncateToWidth(`⚠ ${notice}`, width)));
 		out.push(theme.fg("dim", "↑/↓ select · enter start · x done · b block · r reload · esc close"));
 		return out;
@@ -123,23 +145,13 @@ export function makeDashboardComponent(
 
 	return {
 		render(width: number): string[] {
-			const content = contentLines(Math.max(10, width - 2));
-			let height = 24;
-			try {
-				const tuiRows = tui.terminal?.rows;
-				if (typeof tuiRows === "number" && Number.isFinite(tuiRows) && tuiRows > 4) {
-					height = Math.min(tuiRows, Math.max(height, tuiRows - 2));
-				}
-			} catch {
-				// terminal size unknown — fall back to content height
-			}
-			while (content.length < height - 2) content.push("");
-			if (content.length > height - 2) content.length = height - 2;
-			return content;
+			// Content-sized output (no terminal-height padding): the differential
+			// renderer then has nothing to repaint unless a line actually changed.
+			return contentLines(Math.max(10, width - 2));
 		},
 
 		invalidate(): void {
-			// stateless render
+			// stateless render from cached state
 		},
 
 		async handleInput(data: string): Promise<void> {
@@ -164,9 +176,14 @@ export function makeDashboardComponent(
 				done();
 				return;
 			}
-			if (matchesKey(data, Key.up)) selected = Math.max(0, selected - 1);
-			else if (matchesKey(data, Key.down)) selected++;
-			else if (data === "r" || data === "R") {
+			if (matchesKey(data, Key.up)) {
+				selected = Math.max(0, selected - 1);
+			} else if (matchesKey(data, Key.down)) {
+				selected++;
+				clampSelected();
+			} else if (data === "r" || data === "R") {
+				// Explicit reload from disk (the model may have updated the plan).
+				plan = loadPlan(deps.dataDir, deps.planKey);
 				clampSelected();
 			} else if (matchesKey(data, Key.enter)) {
 				const t = selectedRow();

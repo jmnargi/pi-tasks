@@ -1,5 +1,6 @@
 /**
- * Persistence tests (src/persistence.ts) — plans survive across reloads.
+ * Persistence tests (src/persistence.ts) — session-scoped plans survive
+ * restarts and never leak across sessions.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -8,7 +9,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { clearPlan, loadPlan, planFile, projectKey, savePlan } from "../src/persistence.ts";
+import { clearPlan, loadPlan, planFile, planKey, projectKey, savePlan } from "../src/persistence.ts";
 import { initPlan, markDone } from "../src/store.ts";
 
 let tmp: string;
@@ -22,50 +23,67 @@ afterEach(() => {
 });
 
 describe("persistence", () => {
-	test("save + load round-trips a plan", () => {
-		const p = initPlan({ goal: "g", project: projectKey("/home/u/repo"), todos: ["a", "b"], now: 1 });
+	test("planKey prefers the session id and is deterministic", () => {
+		expect(planKey("abc-123", "/any/cwd")).toBe(planKey("abc-123", "/other/cwd"));
+		expect(planKey("abc-123", "/x")).toMatch(/^sid-[a-zA-Z0-9_-]+$/);
+		expect(planKey(undefined, "/x")).toMatch(/^proj-/);
+	});
+
+	test("save + load round-trips a plan by key", () => {
+		const key = planKey("sess-1", "/home/u/repo");
+		const p = initPlan({ goal: "g", project: key, todos: ["a", "b"], now: 1 });
 		markDone(p, "a", 2);
 		savePlan(tmp, p);
-		const loaded = loadPlan(tmp, "/home/u/repo");
+		const loaded = loadPlan(tmp, key);
 		expect(loaded?.goal).toBe("g");
 		expect(loaded?.phases[0]?.items[0]?.status).toBe("done");
+		// Round-trip survives a "restart" (same session id → same key).
+		expect(loadPlan(tmp, planKey("sess-1", "/home/u/repo"))?.goal).toBe("g");
+	});
+
+	test("different sessions get different plans (no leakage)", () => {
+		const k1 = planKey("session-one", "/repo");
+		const k2 = planKey("session-two", "/repo");
+		expect(k1).not.toBe(k2);
+		savePlan(tmp, initPlan({ goal: "first", project: k1, todos: ["a"], now: 1 }));
+		savePlan(tmp, initPlan({ goal: "second", project: k2, todos: ["b"], now: 1 }));
+		expect(loadPlan(tmp, k1)?.goal).toBe("first");
+		expect(loadPlan(tmp, k2)?.goal).toBe("second");
 	});
 
 	test("missing plan loads as null; clear removes it", () => {
-		expect(loadPlan(tmp, "/nope")).toBeNull();
-		const p = initPlan({ goal: "g", project: projectKey("/x"), todos: ["a"], now: 1 });
+		const key = planKey("nope-session", "/x");
+		expect(loadPlan(tmp, key)).toBeNull();
+		const p = initPlan({ goal: "g", project: key, todos: ["a"], now: 1 });
 		savePlan(tmp, p);
-		expect(clearPlan(tmp, "/x")).toBe(true);
-		expect(loadPlan(tmp, "/x")).toBeNull();
-		expect(clearPlan(tmp, "/x")).toBe(false);
+		expect(clearPlan(tmp, key)).toBe(true);
+		expect(loadPlan(tmp, key)).toBeNull();
+		expect(clearPlan(tmp, key)).toBe(false);
 	});
 
-	test("projectKey normalizes to a safe filename and is deterministic", () => {
+	test("projectKey remains a safe deterministic fallback filename", () => {
 		expect(projectKey("/home/u/my repo/src")).toMatch(/^[a-zA-Z0-9_-]+$/);
 		expect(planFile(tmp, projectKey("/a/b")).endsWith(".json")).toBe(true);
 		expect(projectKey("/home/u/repo")).toBe(projectKey("/home/u/repo"));
-	});
-
-	test("colliding sanitized keys get distinct files via hash suffix", () => {
 		expect(projectKey("/a-b/c")).not.toBe(projectKey("/a/b-c"));
 	});
 
 	test("corrupt plan file degrades to null instead of crashing", () => {
-		fs.mkdirSync(path.join(tmp, "tasks", "plans"), { recursive: true });
-		const key = `${projectKey("/corrupt/repo")}.json`;
-		fs.writeFileSync(path.join(tmp, "tasks", "plans", key), '{"goal":"g","phases":[{"name":"P"}]}');
-		expect(loadPlan(tmp, "/corrupt/repo")).toBeNull();
-		fs.writeFileSync(path.join(tmp, "tasks", "plans", key), "not json at all");
-		expect(loadPlan(tmp, "/corrupt/repo")).toBeNull();
+		fs.mkdirSync(path.join(tmp, "tasks", "sessions"), { recursive: true });
+		const file = planFile(tmp, planKey("corrupt-sess", "/corrupt/repo"));
+		fs.writeFileSync(file, '{"goal":"g","phases":[{"name":"P"}]}');
+		expect(loadPlan(tmp, planKey("corrupt-sess", "/corrupt/repo"))).toBeNull();
+		fs.writeFileSync(file, "not json at all");
+		expect(loadPlan(tmp, planKey("corrupt-sess", "/corrupt/repo"))).toBeNull();
 		fs.writeFileSync(
-			path.join(tmp, "tasks", "plans", key),
+			file,
 			JSON.stringify({ goal: "g", phases: [{ name: "P", items: [{ text: "t", status: "bogus" }] }], createdAt: 1, updatedAt: 1, project: "x" }),
 		);
-		expect(loadPlan(tmp, "/corrupt/repo")).toBeNull();
+		expect(loadPlan(tmp, planKey("corrupt-sess", "/corrupt/repo"))).toBeNull();
 		fs.writeFileSync(
-			path.join(tmp, "tasks", "plans", key),
+			file,
 			JSON.stringify({ goal: "g", phases: [{ name: "P", items: [{ text: "t", status: "pending" }] }], createdAt: 1, updatedAt: 1, project: "x" }),
 		);
-		expect(loadPlan(tmp, "/corrupt/repo")?.goal).toBe("g");
+		expect(loadPlan(tmp, planKey("corrupt-sess", "/corrupt/repo"))?.goal).toBe("g");
 	});
 });

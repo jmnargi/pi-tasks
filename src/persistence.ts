@@ -1,44 +1,54 @@
 /**
  * src/persistence.ts — plan persistence to the pi agent data dir.
  *
- * Plans are stored as one JSON file per project under
- * `<agentDir>/tasks/plans/<safe-project-key>.json` so each repo keeps its own
- * goal + checklist across sessions. Pure IO with no pi imports; the factory
- * supplies the data dir.
+ * Plans are scoped to a SESSION (not the project): each session gets its own
+ * plan file keyed by the pi session id, stored under
+ * `<agentDir>/tasks/sessions/<safe-key>.json`. The session id is stable —
+ * pi reads it back from the session header when a session is resumed — so a
+ * plan survives CLI restarts exactly as long as the session does, and
+ * switching sessions never shows another session's tasks.
+ *
+ * Pure IO with no pi imports; callers supply the data dir and the key.
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import type { Plan, TaskStatus } from "./store.ts";
+import type { Plan } from "./store.ts";
 
 const VALID_STATUSES: readonly string[] = ["pending", "in_progress", "done", "dropped", "blocked"];
 
-/** Normalize a project path into a safe filename key.
- *  A short hash of the raw path is appended so distinct projects whose
- *  sanitized keys collide (e.g. `/a-b/c` vs `/a/b-c`) get separate files. */
+/** Sanitize any string into a safe filename fragment. */
+function safeFragment(s: string): string {
+	const base = s.replace(/[^a-zA-Z0-9_-]/g, "_").replace(/^_+|_+$/g, "");
+	let h = 5381;
+	for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+	return `${base || "k"}-${(h >>> 0).toString(36)}`;
+}
+
+/**
+ * Storage key for a plan. Prefers the pi session id (stable across restarts,
+ * unique per session); falls back to the project path when no session manager
+ * is available (tests, headless embeds).
+ */
+export function planKey(sessionId: string | undefined, cwd: string): string {
+	return sessionId ? `sid-${safeFragment(sessionId)}` : `proj-${projectKey(cwd)}`;
+}
+
+/** Normalize a project path into a safe filename key (fallback scoping). */
 export function projectKey(cwd: string): string {
-	const base = cwd.replace(/[^a-zA-Z0-9_-]/g, "_").replace(/^_+|_+$/g, "") || "root";
 	let h = 5381;
 	for (let i = 0; i < cwd.length; i++) h = ((h << 5) + h + cwd.charCodeAt(i)) | 0;
-	return `${base}-${(h >>> 0).toString(36)}`;
+	return `${cwd.replace(/[^a-zA-Z0-9_-]/g, "_").replace(/^_+|_+$/g, "") || "root"}-${(h >>> 0).toString(36)}`;
 }
 
 export function plansDir(dataDir: string): string {
-	return path.join(dataDir, "tasks", "plans");
+	return path.join(dataDir, "tasks", "sessions");
 }
 
-/** File path for a plan. `key` must be the output of `projectKey(rawPath)` —
- *  callers pass either a raw cwd or `plan.project` (already a key). */
+/** File path for a plan key. */
 export function planFile(dataDir: string, key: string): string {
 	return path.join(plansDir(dataDir), `${key}.json`);
-}
-
-function fileFor(dataDir: string, cwdOrProject: string): string {
-	// Already-keyed strings (from plan.project) contain no path separators and
-	// end in our hash suffix; raw cwds contain "/" (or "\\" on Windows).
-	const isRaw = cwdOrProject.includes("/") || cwdOrProject.includes("\\");
-	return planFile(dataDir, isRaw ? projectKey(cwdOrProject) : cwdOrProject);
 }
 
 /** Structural validation for a loaded plan — a truncated/corrupt file must
@@ -58,10 +68,10 @@ function isValidPlan(p: unknown): p is Plan {
 	return typeof plan.createdAt === "number" && typeof plan.updatedAt === "number" && typeof plan.project === "string";
 }
 
-/** Load a plan for `cwd`, or null when none exists (or the file is corrupt). */
-export function loadPlan(dataDir: string, cwd: string): Plan | null {
+/** Load a plan for `key`, or null when none exists (or the file is corrupt). */
+export function loadPlan(dataDir: string, key: string): Plan | null {
 	try {
-		const parsed: unknown = JSON.parse(fs.readFileSync(fileFor(dataDir, cwd), "utf8"));
+		const parsed: unknown = JSON.parse(fs.readFileSync(planFile(dataDir, key), "utf8"));
 		return isValidPlan(parsed) ? parsed : null;
 	} catch {
 		return null;
@@ -70,7 +80,7 @@ export function loadPlan(dataDir: string, cwd: string): Plan | null {
 
 /** Persist a plan (atomic write via temp + rename). */
 export function savePlan(dataDir: string, plan: Plan): void {
-	const file = fileFor(dataDir, plan.project);
+	const file = planFile(dataDir, plan.project);
 	fs.mkdirSync(path.dirname(file), { recursive: true });
 	const tmp = `${file}.tmp`;
 	fs.writeFileSync(tmp, JSON.stringify(plan, null, 2) + "\n");
@@ -78,8 +88,8 @@ export function savePlan(dataDir: string, plan: Plan): void {
 }
 
 /** Delete a plan (returns true when one existed). */
-export function clearPlan(dataDir: string, cwd: string): boolean {
-	const file = fileFor(dataDir, cwd);
+export function clearPlan(dataDir: string, key: string): boolean {
+	const file = planFile(dataDir, key);
 	if (!fs.existsSync(file)) return false;
 	fs.rmSync(file);
 	return true;
