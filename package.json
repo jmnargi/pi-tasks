@@ -1,0 +1,50 @@
+{
+  "name": "pi-tasks",
+  "version": "0.1.0",
+  "description": "Goal + todo management for the pi coding agent: the model tracks its work against a goal and checklist, and pi nudges it when it stops with open items. Modeled on the todo tool of other coding agents.",
+  "type": "module",
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "pi",
+    "pi-extension",
+    "pi-package",
+    "todos",
+    "tasks",
+    "goals",
+    "checklist",
+    "planning"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jmnargi/pi-tasks.git"
+  },
+  "license": "MIT",
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "^0.84.2",
+    "@earendil-works/pi-ai": "^0.84.2",
+    "@earendil-works/pi-coding-agent": "^0.84.2",
+    "@types/bun": "^1.4.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}
