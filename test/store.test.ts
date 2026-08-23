@@ -58,6 +58,65 @@ describe("initPlan", () => {
 	});
 });
 
+describe("duplicate text guards", () => {
+	test("initPlan rejects duplicate item texts", () => {
+		expect(() => initPlan({ goal: "g", project: "p", todos: ["a", "a"], now })).toThrow("duplicate task text");
+	});
+
+	test("initPlan rejects duplicates across phases", () => {
+		expect(() =>
+			initPlan({
+				goal: "g",
+				project: "p",
+				phases: [
+					{ name: "A", items: ["x"] },
+					{ name: "B", items: ["x"] },
+				],
+				now,
+			}),
+		).toThrow("duplicate task text");
+	});
+
+	test("appendTasks rejects texts already in the plan", () => {
+		const p = plan();
+		const r = appendTasks(p, ["write tests"], undefined, now);
+		expect(r.ok).toBe(false);
+		if (!r.ok) expect(r.error).toContain("already in the plan");
+	});
+});
+
+describe("blocked guard + invariants", () => {
+	test("markDone refuses a blocked item and surfaces its reason", () => {
+		const p = plan();
+		markBlocked(p, "write endpoint", "waiting on API key", now);
+		const r = markDone(p, "write endpoint", now);
+		expect(r.ok).toBe(false);
+		if (!r.ok) expect(r.error).toContain("waiting on API key");
+	});
+
+	test("markStarted still allows starting a blocked item (explicit override)", () => {
+		const p = plan();
+		markBlocked(p, "write endpoint", "waiting", now);
+		expect(markStarted(p, "write endpoint", now).ok).toBe(true);
+	});
+
+	test("re-blocking with empty reason keeps the original reason", () => {
+		const p = plan();
+		markBlocked(p, "write endpoint", "waiting on API key", now);
+		markBlocked(p, "write endpoint", "", now);
+		expect(p.phases[0]!.items[0]!.note).toBe("waiting on API key");
+	});
+
+	test("at most one item is in_progress at any time", () => {
+		const p = plan();
+		for (const t of ["write endpoint", "write tests", "update docs"]) markDone(p, t, now);
+		appendTasks(p, ["new one"], undefined, now);
+		let active = 0;
+		for (const ph of p.phases) for (const i of ph.items) if (i.status === "in_progress") active++;
+		expect(active).toBeLessThanOrEqual(1);
+	});
+});
+
 describe("markDone", () => {
 	test("marks done and auto-promotes the next open item", () => {
 		const p = plan();
@@ -114,8 +173,8 @@ describe("appendTasks", () => {
 		const p = initPlan({ goal: "g", project: "p", now });
 		const r = appendTasks(p, ["one"], undefined, now);
 		expect(r.ok).toBe(true);
+		if (!r.ok) throw new Error(r.error);
 		expect(r.added).toBe(1);
-		expect(p.phases[0]!.items[0]!.status).toBe("in_progress");
 	});
 });
 

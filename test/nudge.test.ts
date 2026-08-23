@@ -5,12 +5,17 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+	evaluateNudge,
+	MAX_CONSECUTIVE_NUDGES,
 	NUDGE_CUSTOM_TYPE,
 	buildPlanAppendix,
 	formatNudgeMessage,
 	newNudgeState,
 	recordAgentActivity,
+	recordEscalation,
 	recordNudge,
+	recordProgress,
+	resetNudgeState,
 	shouldNudge,
 } from "../src/nudge.ts";
 import { initPlan } from "../src/store.ts";
@@ -51,6 +56,53 @@ describe("shouldNudge", () => {
 		recordNudge(s, 1000);
 		// No agent activity since nudge → even after cooldown, no re-nudge.
 		expect(shouldNudge(s, plan(), 2000)).toBe(false);
+	});
+});
+
+describe("nudge exhaustion (evaluateNudge)", () => {
+	test("escalates after MAX_CONSECUTIVE_NUDGES without progress", () => {
+		const s = newNudgeState(1);
+		let now = 1000;
+		for (let i = 0; i < MAX_CONSECUTIVE_NUDGES; i++) {
+			recordProgress(s, plan());
+			const d = evaluateNudge(s, plan(), now);
+			expect(d.action === "nudge" || d.action === "escalate").toBe(true);
+			if (d.action === "nudge") recordNudge(s, now);
+			recordAgentActivity(s);
+			now += 2000;
+		}
+		recordProgress(s, plan());
+		expect(evaluateNudge(s, plan(), now).action).toBe("escalate");
+		// After escalation is recorded: silent.
+		recordEscalation(s);
+		expect(evaluateNudge(s, plan(), now + 2000).action).toBe("none");
+	});
+
+	test("real progress resets the exhaustion counter", () => {
+		const s = newNudgeState(1);
+		recordProgress(s, plan()); // open=2 → lowWater 2
+		recordNudge(s, 1000);
+		recordNudge(s, 3000); // consecutive = 2
+		const smaller = plan();
+		smaller.phases[0]!.items[1]!.status = "done"; // open drops to 1
+		recordProgress(s, smaller);
+		expect(s.consecutive).toBe(0);
+	});
+
+	test("all-done plan never nudges or escalates", () => {
+		const s = newNudgeState(1);
+		recordEscalation(s);
+		const done = plan();
+		done.phases[0]!.items.forEach((i) => (i.status = "done"));
+		expect(evaluateNudge(s, done, 99999).action).toBe("none");
+	});
+
+	test("resetNudgeState clears everything", () => {
+		const s = newNudgeState(1);
+		recordNudge(s, 1000);
+		recordEscalation(s);
+		resetNudgeState(s);
+		expect(shouldNudge(s, plan(), 1001)).toBe(true);
 	});
 });
 

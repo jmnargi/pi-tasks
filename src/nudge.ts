@@ -3,9 +3,13 @@
  *
  * When the agent settles (stops) with open tasks, the extension sends a
  * turn-triggering custom message so even a weak model cannot miss that work
- * is outstanding. A cooldown prevents a nudge→turn→settle→nudge loop from
- * burning tokens: we only nudge again after the agent has actually done a
- * turn since the last nudge.
+ * is outstanding. Three gates prevent a nudge→turn→settle→nudge loop from
+ * burning tokens:
+ *   - "agent acted since last nudge" (a nudge turn does not re-arm itself),
+ *   - a cooldown between nudges,
+ *   - an exhaustion cap: after MAX_CONSECUTIVE_NUDGES nudges without the open
+ *     count dropping below its low-water mark, we stop nudging and escalate to
+ *     the user instead (status warning + one notify).
  *
  * The prompt appendix is a short system-prompt block appended (via
  * before_agent_start) only while a plan is active, so the model is
@@ -16,6 +20,18 @@ import { nextOpenItem, openCount, renderPlan, type Plan } from "./store.ts";
 
 /** The pi customType used for nudge messages (matches the renderer). */
 export const NUDGE_CUSTOM_TYPE = "tasks-nudge";
+
+/**
+ * Consecutive nudges (without real progress) before giving up and leaving the
+ * work to the user. Mirrors pi's own session_stop continuation cap in spirit.
+ */
+export const MAX_CONSECUTIVE_NUDGES = 5;
+
+/** What should happen when the agent settles with open tasks. */
+export type NudgeDecision =
+	| { action: "nudge"; message: ReturnType<typeof formatNudgeMessage> }
+	| { action: "escalate"; open: number; goal: string }
+	| { action: "none" };
 
 /**
  * Short block appended to the system prompt while a plan is active. Kept
@@ -41,26 +57,69 @@ export interface NudgeState {
 	agentActedSinceNudge: boolean;
 	/** Minimum gap between nudges (ms). */
 	cooldownMs: number;
+	/** Nudges sent since the open count last dropped (consecutive-no-progress counter). */
+	consecutive: number;
+	/** Lowest open count seen; progress = dropping strictly below this. */
+	lowWater: number;
 }
 
 export function newNudgeState(cooldownMs = 60_000): NudgeState {
-	return { lastNudgeAt: 0, agentActedSinceNudge: true, cooldownMs };
+	return { lastNudgeAt: 0, agentActedSinceNudge: true, cooldownMs, consecutive: 0, lowWater: Number.POSITIVE_INFINITY };
 }
 
 /**
- * Should we nudge right now? Nudge when:
+ * Track progress across settles. Called on every agent_settled (before the
+ * decision): when the open count drops below the low-water mark, real progress
+ * happened — reset the consecutive-nudge counter and re-arm.
+ */
+export function recordProgress(state: NudgeState, plan: Plan | null): void {
+	if (!plan) {
+		state.consecutive = 0;
+		state.lowWater = Number.POSITIVE_INFINITY;
+		return;
+	}
+	const open = openCount(plan);
+	if (open < state.lowWater) {
+		state.lowWater = open;
+		state.consecutive = 0;
+	}
+}
+
+/** Reset all nudge state (e.g. after a plan is cleared). */
+export function resetNudgeState(state: NudgeState): void {
+	state.lastNudgeAt = 0;
+	state.agentActedSinceNudge = true;
+	state.consecutive = 0;
+	state.lowWater = Number.POSITIVE_INFINITY;
+}
+
+/**
+ * Decide what to do when the agent settles. Nudge when:
  *   - there are open tasks,
  *   - the agent has acted (or never been nudged) since the last nudge,
- *   - and the cooldown has elapsed.
+ *   - the cooldown has elapsed,
+ *   - and we have not exhausted MAX_CONSECUTIVE_NUDGES without progress.
+ * When exhausted: escalate to the user (once — `none` on every settle after).
+ */
+export function evaluateNudge(state: NudgeState, plan: Plan | null, now: number): NudgeDecision {
+	if (!plan) return { action: "none" };
+	const open = openCount(plan);
+	if (open === 0) return { action: "none" };
+	if (state.consecutive >= MAX_CONSECUTIVE_NUDGES) {
+		return state.consecutive === MAX_CONSECUTIVE_NUDGES ? { action: "escalate", open, goal: plan.goal } : { action: "none" };
+	}
+	if (!state.agentActedSinceNudge) return { action: "none" };
+	// Never nudged yet → nudge regardless of cooldown.
+	if (state.lastNudgeAt !== 0 && now - state.lastNudgeAt < state.cooldownMs) return { action: "none" };
+	return { action: "nudge", message: formatNudgeMessage(plan) };
+}
+
+/**
+ * Back-compat boolean form of evaluateNudge for callers that only need the
+ * nudge/no-nudge answer (escalation is handled by the caller).
  */
 export function shouldNudge(state: NudgeState, plan: Plan | null, now: number): boolean {
-	if (!plan) return false;
-	if (openCount(plan) === 0) return false;
-	if (!state.agentActedSinceNudge) return false;
-	// Never nudged yet → nudge regardless of cooldown.
-	if (state.lastNudgeAt === 0) return true;
-	if (now - state.lastNudgeAt < state.cooldownMs) return false;
-	return true;
+	return evaluateNudge(state, plan, now).action === "nudge";
 }
 
 /** Record that the agent produced a turn (resets the "needs agent action" gate). */
@@ -71,6 +130,13 @@ export function recordAgentActivity(state: NudgeState): void {
 /** Record that a nudge was sent. */
 export function recordNudge(state: NudgeState, now: number): void {
 	state.lastNudgeAt = now;
+	state.agentActedSinceNudge = false;
+	state.consecutive++;
+}
+
+/** Record that escalation happened (stops further nudges until progress). */
+export function recordEscalation(state: NudgeState): void {
+	state.consecutive = MAX_CONSECUTIVE_NUDGES + 1;
 	state.agentActedSinceNudge = false;
 }
 

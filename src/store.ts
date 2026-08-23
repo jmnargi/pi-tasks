@@ -59,36 +59,42 @@ export function openCount(plan: Plan): number {
 }
 
 export function nextOpenItem(plan: Plan): { phase: string; item: TaskItem } | null {
+	return pickByStatus(plan, "in_progress") ?? pickByStatus(plan, "pending") ?? pickByStatus(plan, "blocked");
+}
+/** First item with the given status, scanning phases in order. */
+function pickByStatus(plan: Plan, status: TaskStatus): { phase: string; item: TaskItem } | null {
 	for (const phase of plan.phases) {
 		for (const item of phase.items) {
-			if (item.status === "pending" || item.status === "in_progress" || item.status === "blocked") {
-				return { phase: phase.name, item };
-			}
+			if (item.status === status) return { phase: phase.name, item };
 		}
 	}
 	return null;
 }
 
+
 function touch(plan: Plan, now: number): void {
 	plan.updatedAt = now;
 }
 
-/** Auto-promote the earliest still-open item (pending first) to in_progress. */
-function promoteNext(plan: Plan, now: number): void {
-	for (const phase of plan.phases) {
-		for (const item of phase.items) {
-			if (item.status === "pending") {
-				item.status = "in_progress";
-				touch(plan, now);
-				return;
-			}
-		}
+/**
+ * First duplicate text in a list of task texts, or null. Item identity is the
+ * verbatim text, so duplicates would make ops ambiguous — reject up front.
+ */
+export function findDuplicateText(texts: string[]): string | null {
+	const seen = new Set<string>();
+	for (const t of texts) {
+		if (seen.has(t)) return t;
+		seen.add(t);
 	}
+	return null;
 }
 
 /** Create a new plan from an init request. */
 export function initPlan(input: InitInput): Plan {
 	const now = input.now ?? Date.now();
+	const flat = input.phases && input.phases.length > 0 ? input.phases.flatMap((p) => p.items) : (input.todos ?? []);
+	const dup = findDuplicateText(flat);
+	if (dup) throw new Error(`duplicate task text "${dup}" — item text must be unique; reword one of them`);
 	const phases: PlanPhase[] =
 		input.phases && input.phases.length > 0
 			? input.phases.map((p) => ({ name: p.name, items: p.items.map((t) => ({ text: t, status: "pending" as TaskStatus })) }))
@@ -104,6 +110,35 @@ export function initPlan(input: InitInput): Plan {
 	}
 	return { goal: input.goal, phases, createdAt: now, updatedAt: now, project: input.project };
 }
+
+
+/**
+ * Auto-promote the earliest still-open item (phase order) to in_progress.
+ * Demotes any other in_progress first so at most one item is ever active —
+ * even if a hand-edited plan file or future bug left two behind.
+ */
+function promoteNext(plan: Plan, now: number): void {
+	let demoted = false;
+	for (const phase of plan.phases) {
+		for (const item of phase.items) {
+			if (item.status === "in_progress") {
+				item.status = "pending";
+				demoted = true;
+			}
+		}
+	}
+	for (const phase of plan.phases) {
+		for (const item of phase.items) {
+			if (item.status === "pending") {
+				item.status = "in_progress";
+				touch(plan, now);
+				return;
+			}
+		}
+	}
+	if (demoted) touch(plan, now);
+}
+
 
 /** Find an item by exact text (the task id is its text). */
 export function findItem(plan: Plan, text: string): { phase: PlanPhase; item: TaskItem } | null {
@@ -139,6 +174,9 @@ export function markDone(plan: Plan, text: string, now: number): OpOk | OpError 
 	const hit = findItem(plan, text);
 	if (!hit) return { ok: false, error: `no task "${text}"` };
 	if (hit.item.status === "dropped") return { ok: false, error: `task "${text}" was dropped` };
+	if (hit.item.status === "blocked") {
+		return { ok: false, error: `task "${text}" is blocked (${hit.item.note ?? "no reason"}) — unblock it first` };
+	}
 	hit.item.status = "done";
 	hit.item.note = undefined;
 	touch(plan, now);
@@ -160,7 +198,7 @@ export function markBlocked(plan: Plan, text: string, reason: string, now: numbe
 	const hit = findItem(plan, text);
 	if (!hit) return { ok: false, error: `no task "${text}"` };
 	hit.item.status = "blocked";
-	hit.item.note = reason;
+	hit.item.note = reason || hit.item.note;
 	touch(plan, now);
 	promoteNext(plan, now);
 	return { ok: true };
@@ -177,8 +215,14 @@ export function unblock(plan: Plan, text: string, now: number): OpOk | OpError {
 	return { ok: true };
 }
 
-export function appendTasks(plan: Plan, todos: string[], phaseName: string | undefined, now: number): OpOk<{ added: number }> {
+export function appendTasks(plan: Plan, todos: string[], phaseName: string | undefined, now: number): OpOk<{ added: number }> | OpError {
 	if (todos.length === 0) return { ok: true, added: 0 };
+	const existing = new Set<string>();
+	for (const phase of plan.phases) for (const item of phase.items) existing.add(item.text);
+	for (const t of todos) {
+		if (existing.has(t)) return { ok: false, error: `duplicate task text "${t}" — already in the plan` };
+		existing.add(t);
+	}
 	let phase = phaseName ? plan.phases.find((p) => p.name === phaseName) : undefined;
 	if (phaseName && !phase) {
 		phase = { name: phaseName, items: [] };
