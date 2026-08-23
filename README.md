@@ -1,83 +1,234 @@
 # pi-tasks
 
-Goal + todo tracking for the [pi coding agent](https://pi.dev). The model
-keeps a goal and checklist per project, updates it as it works, and **pi
-nudges it if it stops with open items** — no more silently-abandoned work.
+Goal + todo tracking for the **pi coding agent**: a plugin for
+[pi](https://github.com/earendil-works/pi) (the `@earendil-works/pi-coding-agent`
+CLI).
 
-Modeled on the todo tool of other coding agents (init → start → done, with
-phases, blocking, and auto-promotion), built as a first-class pi extension.
+`pi-tasks` gives the model a persistent goal + checklist to work against, and
+makes **stopping early expensive**: if the model ends its turn while tasks are
+still open, pi injects a reminder **as a real user message** telling it the
+goal is not done and to keep working — no more silently-abandoned work from
+models that answer once and stop.
+
+- **one `tasks` tool** — init → start → done, with phases, blocking, and
+  auto-promotion (modeled on the todo tool of other coding agents);
+- **session-scoped plans** — every session gets its own plan; switching
+  sessions never shows another session's tasks;
+- **restart-safe** — plans live on disk keyed by the pi session id (stable
+  across resume), so a plan survives CLI restarts exactly as long as the
+  session does;
+- **auto-nudge with a ceiling** — repeated no-progress settles escalate to
+  *you* instead of burning tokens in a nudge→turn→settle loop.
+
+**Status:** typechecked (`tsc --noEmit`), unit-tested (`bun test`, 49 tests
+across store / nudge / persistence / ui / factory-surface). See
+[Development](#development).
+
+---
 
 ## Install
 
+Install-and-run: **no configuration needed.**
+
 ```bash
-pi install git:github.com/jmnargi/pi-tasks
+pi install git:github.com/jmnargi/pi-tasks   # or: pi install npm:<pkg>
 ```
 
-Then start pi (or `/reload`). No configuration needed. To update after newer
-commits are pushed, re-run the same `pi install` command (pi pins git
-packages at install time).
+That clones the package into `~/.pi/agent/git/…`, installs its deps, and
+registers it. pi pins git packages at install time — re-run the same
+`pi install` command to pull newer commits, then `/reload` or restart pi.
 
-## What the model gets
+**Option B — copy into the auto-discovery directory**
 
-A single `tasks` tool with an `op` parameter:
+```bash
+mkdir -p ~/.pi/agent/extensions/pi-tasks
+cp -r src package.json tsconfig.json ~/.pi/agent/extensions/pi-tasks/
+cd ~/.pi/agent/extensions/pi-tasks && npm install
+```
+
+> **Security:** extensions run with your full system permissions and can
+> execute arbitrary code. Only install from sources you trust.
+
+## Quick start
+
+In a pi session, ask for something multi-step:
+
+```
+Fix all failing tests in this repo.
+```
+
+The model calls `tasks op=init` with a goal + checklist, works through the
+items (`op=done` auto-promotes the next one), and — critically — if it stops
+to chat while items are still open, pi sends this as a **user message** on its
+next turn:
+
+```
+[tasks] You stopped your turn, but the work is NOT complete: 2 tasks still open
+and the goal is not done.
+Goal: Fix all failing tests in this repo.
+Current task: "fix auth module" (Tasks)
+Keep working on the plan now. Do not stop until every item is closed ...
+```
+
+— the exact same channel as you typing it yourself, so even a weak model
+treats it as instruction rather than noise.
+
+To check state at any time: ask the model (`tasks op=view`), or run `/tasks`.
+
+## The `tasks` tool
+
+A single tool with an `op` parameter:
 
 | op | effect |
 |----|--------|
-| `init` | Create a plan: `goal` + `todos` (flat) or `phases` (grouped). The first item starts in progress. |
+| `init` | Create a plan: `goal` + `todos` (flat) or `phases` (grouped). The first item starts in progress. Refuses to clobber an active plan unless `replace: true`. Rejects duplicate item texts. |
 | `view` | Render the current plan (goal, phases, statuses, open counts). |
-| `start` | Mark `task` as the current item. |
-| `done` | Mark `task` done; the next open item auto-promotes. |
+| `start` | Mark `task` as the current item (demotes any other active item). |
+| `done` | Mark `task` done; the next pending item auto-promotes. Blocked items must be unblocked first. |
 | `drop` | Mark `task` abandoned (no longer counts as open). |
-| `block` | Mark `task` blocked with a `reason`. |
+| `block` | Mark `task` blocked with a `reason`; re-blocking with an empty reason keeps the old one. |
 | `unblock` | Re-open a blocked item. |
-| `append` | Add `todos` (optionally into `phase`). |
-| `clear` | Delete the plan for this project. |
+| `append` | Add `todos` (optionally into a new/existing `phase`). Duplicate texts are rejected. |
+| `clear` | Delete the plan for this session. |
 
-Items are addressed by their exact text (they are short verbatim actions —
-"what, not how"). A plan persists per project under the pi agent dir, so it
-survives across sessions.
+Items are addressed by their **exact text** ("what, not how" verbatim actions)
+— duplicates are rejected at `init`/`append` because item text *is* the id.
+At most one item is ever `in_progress`; completing/dropping/blocking promotes
+the earliest pending item automatically.
 
-### Auto-nudge
+## Auto-nudge
 
-On `agent_settled` (pi will not continue running on its own), if the plan has
-open items and the agent has done work since the last nudge, the extension
-injects a **turn-triggering custom message** (`tasks-nudge` renderer, shown
-with a distinct TUI block) listing the goal, the next open item, and the full
-plan. A 60s cooldown + "agent acted since last nudge" gate prevents a
-nudge→turn→settle→nudge token loop. Closing every item (done/drop/block)
-stops the nudges.
+When pi settles (`agent_settled`) with open items, the extension decides:
+
+1. **Progress gate** — nudging only continues while the open count keeps
+   dropping below its low-water mark; a model that answers without touching
+   the plan stops making "progress".
+2. **Activity gate** — the agent must have produced a turn since the last
+   nudge (a nudge turn does not re-arm itself).
+3. **Cooldown** — 60 s between nudges.
+4. **Exhaustion cap** — after **5 consecutive nudges without progress**, pi
+   stops nudging and escalates to *you*: a warning notification plus a
+   `tasks STUCK` footer status, until an item actually closes or the plan is
+   cleared/re-inited.
+
+Delivery is `pi.sendUserMessage()` — a genuine user message through pi's
+prompt flow, which starts a new agent turn. The custom-message renderer
+(`tasks-nudge`) remains for contexts that cannot take user messages.
 
 ### System-prompt appendix
 
 While a plan is active, `before_agent_start` appends a short `[tasks]` block
-to the system prompt (goal, open count, current item, and a reminder to keep
-the list updated via the `tasks` tool). It appears only when a plan exists,
-so it costs nothing when there is no active work, and it keeps even weak
-models continuously aware that a goal + checklist is in flight.
+to the system prompt (goal, open count, current item, keep-the-list-updated
+reminder). It appears only when a plan exists — zero cost when there is no
+active work — so even weak models stay continuously aware that a goal +
+checklist is in flight.
 
-## Human-facing
+## Live UI
 
-- `/tasks` — show the current project's plan as a notification.
-- A `tasks N open` status in the footer while items are open (clears when the
-  plan is complete or closed).
+Watching the plan is first-class in the pi TUI (all best-effort: guarded on
+`ctx.hasUI`, silent fallback in `-p`/JSON/RPC modes):
+
+- **Footer status** (`ctx.ui.setStatus`): `tasks 2/5 · ▸ write tests` while
+  work is open; clears when everything closes. Shows `tasks STUCK` after
+  nudge exhaustion.
+- **Ambient widget** (`ctx.ui.setWidget`, above the editor): goal, progress
+  bar, and themed item list while items are outstanding; disappears when the
+  plan completes or clears.
+- **`/tasks` fullscreen panel** (`ctx.ui.custom`): the plan rendered with a
+  progress bar and per-status theming (`▸` active · `✓` done · `!` blocked ·
+  `○` pending · `·` dropped), with inline actions:
+
+  | key | action |
+  |-----|--------|
+  | ↑/↓ | move selection |
+  | enter | start the selected item |
+  | x | mark done |
+  | b | block (type a reason, enter confirms) |
+  | r | reload from disk (the model may have updated it) |
+  | esc / q | close |
+
+- **Tool-call rendering** (`renderCall`/`renderResult`): each `tasks` call
+  renders as a compact `tasks done · write tests` row with a themed result
+  line (`2 open · 5 total · next: …`); expand the tool call to see the full
+  themed plan instead of raw text.
+
+## How the model learns about this plugin
+
+Nothing is injected behind the model's back — all first-party pi extension
+surfaces, auditable in `src/index.ts`:
+
+- **Tool schema** (`registerTool`): the `tasks` tool reaches the model like a
+  built-in, with a full op-by-op description.
+- **`promptSnippet` + `promptGuidelines`**: one line in the system prompt's
+  available-tools listing, plus bullets spelling out the workflow (init before
+  substantial work, update as you go, address by exact text, expect a nudge).
+- **System-prompt appendix** (above) only while a plan exists.
+- The nudge is delivered through `sendUserMessage` — attributed exactly like
+  user input, not smuggled into context.
+
+## Data layout
+
+```
+<agentDir>/tasks/
+  sessions/<key>.json     # one plan per session (key = sid-<hash of session id>;
+                          # falls back to proj-<hash of cwd> without a session manager)
+```
+
+Plans are small JSON documents (goal, phases, items with status/note,
+timestamps), written atomically (temp + rename). A corrupt file degrades to
+"no plan" rather than crashing later operations.
+
+## Session scoping
+
+- Every session gets its own plan — `session_start` re-keys storage from
+  `ctx.sessionManager.getSessionId()` and resets nudge history, so one
+  session's exhaustion can never suppress another's nudges.
+- The session id is read back from the session header on resume, so resuming
+  a session restores its plan across CLI restarts.
+- No session manager available (tests/embeds)? Plans fall back to per-cwd keys.
 
 ## Development
 
 ```bash
 npm install && npm i -D @types/bun
 npx tsc --noEmit      # strict typecheck
-bun test              # store, nudge, persistence, factory-surface tests
+bun test              # 49 unit tests (store, nudge, persistence, ui, factory surface)
 ```
 
-## How it works
+Tests are hermetic: pure state machines, temp-dir persistence, fake `pi`
+surfaces that fire `agent_settled` end-to-end — no pi install or API keys
+needed.
 
-- `src/store.ts` — pure goal+todo state machine (statuses, phases, promotion).
-- `src/nudge.ts` — pure nudge decisioning (cooldown + activity gate) and
-  message shaping.
-- `src/persistence.ts` — per-project plan files under the pi agent dir.
-- `src/index.ts` — the factory: `tasks` tool, `/tasks` command, nudge events
-  (`message_end` activity tracking, `agent_settled`), and the `tasks-nudge`
-  message renderer.
+## Architecture
+
+```
+src/
+  store.ts         pure goal+todo state machine — statuses, phases, promotion,
+                   duplicate rejection, single in_progress invariant
+  nudge.ts         pure decisioning — evaluateNudge (progress/activity/cooldown/
+                   exhaustion gates) + message shaping + prompt appendix
+  persistence.ts   session-keyed plan files, atomic writes, structural validation
+  ui.ts            pure TUI formatting — themed plan view, progress bar, stats
+                   (no pi imports; unit-testable without a terminal)
+  dashboard.ts     fullscreen /tasks panel component (cached-state render:
+                   no IO inside render(), so streaming never repaints it)
+  index.ts         the factory — registers the tool, command, widget/status,
+                   render hooks, nudge events, and message renderer
+```
+
+Design rule: everything below `index.ts` is pure and side-effect-free;
+`index.ts` is the only file that talks to pi.
+
+## Limitations
+
+- Nudges fire only in interactive sessions where extensions receive
+  `agent_settled`; headless one-shot runs settle once and exit.
+- One plan per session — parallel goals need separate sessions (deliberate:
+  one goal per checklist keeps the model honest about what "done" means).
+- The nudge cannot force a model to obey; after the exhaustion cap it gets out
+  of the way and tells *you* the work is stuck.
+- Item identity is verbatim text — the duplicate guard rejects collisions up
+  front, but two genuinely-different tasks still need distinct wordings.
 
 ## License
 
