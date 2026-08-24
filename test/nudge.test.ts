@@ -19,11 +19,10 @@ import {
 	resetNudgeState,
 	shouldNudge,
 } from "../src/nudge.ts";
-import { initPlan } from "../src/store.ts";
+import { initList } from "../src/store.ts";
 
 const plan = () =>
-	initPlan({
-		goal: "Ship",
+	initList({
 		project: "p",
 		todos: ["a", "b"],
 		now: 0,
@@ -108,31 +107,30 @@ describe("nudge exhaustion (evaluateNudge)", () => {
 });
 
 describe("formatNudgeMessage", () => {
-	test("shapes the reminder payload with goal-incomplete framing", () => {
+	test("shapes the reminder payload with not-complete framing", () => {
 		const m = formatNudgeMessage(plan());
 		expect(m.customType).toBe(NUDGE_CUSTOM_TYPE);
 		expect(m.display).toBe(true);
 		expect(m.details.open).toBe(2);
 		expect(m.details.next).toBe("a");
 		expect(m.content).toContain("NOT complete");
-		expect(m.content).toContain("Goal: Ship");
 		expect(m.content).toContain("[ ] b");
 	});
 
-	test("formatNudgeText is user-message prose with plan", () => {
+	test("formatNudgeText is user-message prose about the open tasks", () => {
 		const text = formatNudgeText(plan());
 		expect(text).toContain("[tasks] You stopped your turn");
-		expect(text).toContain("2 tasks still open");
+		expect(text).toContain("2 open task");
 		expect(text).toContain('Current task: "a"');
 		expect(text).toContain("Do not reply to this message");
 	});
 });
 
 describe("buildPlanAppendix", () => {
-	test("includes goal, open count, and current item", () => {
+	test("includes open count and current item", () => {
 		const text = buildPlanAppendix(plan());
-		expect(text).toContain("active goal + todo plan");
-		expect(text).toContain("Goal: Ship (2 open items)");
+		expect(text).toContain("an active todo list");
+		expect(text).toContain("2 tasks still open");
 		expect(text).toContain('Current: "a"');
 		expect(text).toContain("op=view");
 	});

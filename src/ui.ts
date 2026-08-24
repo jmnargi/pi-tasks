@@ -12,9 +12,9 @@ export interface ThemeLike {
 	bold(text: string): string;
 }
 
-import { nextOpenItem, openCount, type Plan, type TaskItem } from "./store.ts";
+import { nextOpenItem, openCount, type TaskItem, type TaskList } from "./store.ts";
 
-export interface PlanStats {
+export interface ListStats {
 	open: number;
 	total: number;
 	done: number;
@@ -22,20 +22,12 @@ export interface PlanStats {
 	phase: string;
 }
 
-/** One-line summary of plan progress, e.g. "2/5 · ▸ update docs". */
-export function planStats(plan: Plan): PlanStats {
-	const total = plan.phases.reduce((n, p) => n + p.items.length, 0);
-	const done = plan.phases.reduce((n, p) => n + p.items.filter((i) => i.status === "done").length, 0);
-	const next = nextOpenItem(plan);
-	return { open: openCount(plan), total, done, current: next?.item.text ?? "", phase: next?.phase ?? "" };
-}
-
-/** "Ship the API — 2/5 · ▸ update docs" for footer status lines. */
-export function statusLine(plan: Plan): string {
-	const s = planStats(plan);
-	const parts = [`${s.done}/${s.total}`];
-	if (s.current) parts.push(`▸ ${s.current}`);
-	return `${plan.goal} — ${parts.join(" · ")}`;
+/** One-line summary of list progress. */
+export function planStats(list: TaskList): ListStats {
+	const total = list.phases.reduce((n, p) => n + p.items.length, 0);
+	const done = list.phases.reduce((n, p) => n + p.items.filter((i) => i.status === "done").length, 0);
+	const next = nextOpenItem(list);
+	return { open: openCount(list), total, done, current: next?.item.text ?? "", phase: next?.phase ?? "" };
 }
 
 /** Theme token for a task status (subset of pi's ThemeColor). */
@@ -78,19 +70,18 @@ export function progressBar(done: number, total: number, width = 12): string {
 }
 
 /**
- * Full themed plan rendering, shared by the widget, the /tasks command and the
- * expanded tool-result view. Plain-text variant lives in store.renderPlan.
+ * Full themed list rendering, shared by the widget, the /tasks command and the
+ * expanded tool-result view. Plain-text variant lives in store.renderTaskList.
  */
-export function renderPlanThemed(plan: Plan, theme: ThemeLike): string[] {
-	const s = planStats(plan);
+export function renderPlanThemed(list: TaskList, theme: ThemeLike): string[] {
+	const s = planStats(list);
 	const out: string[] = [
-		theme.fg("accent", theme.bold(`◈ ${plan.goal}`)),
 		theme.fg(
 			"muted",
 			`${progressBar(s.done, s.total)} ${s.done}/${s.total} · ${s.open} open`,
 		),
 	];
-	for (const phase of plan.phases) {
+	for (const phase of list.phases) {
 		if (phase.items.length === 0) continue;
 		out.push("");
 		out.push(theme.fg("dim", theme.bold(phase.name.toUpperCase())));

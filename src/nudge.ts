@@ -2,7 +2,7 @@
  * src/nudge.ts — pure nudge decisioning + message shaping + prompt appendix.
  *
  * When the agent settles (stops) with open tasks, the extension sends a
- * turn-triggering custom message so even a weak model cannot miss that work
+ * turn-triggering user message so even a weak model cannot miss that work
  * is outstanding. Three gates prevent a nudge→turn→settle→nudge loop from
  * burning tokens:
  *   - "agent acted since last nudge" (a nudge turn does not re-arm itself),
@@ -12,11 +12,11 @@
  *     the user instead (status warning + one notify).
  *
  * The prompt appendix is a short system-prompt block appended (via
- * before_agent_start) only while a plan is active, so the model is
- * continuously reminded to keep the todo list updated.
+ * before_agent_start) only while tasks are open, so the model is
+ * continuously reminded to keep the list updated.
  */
 
-import { nextOpenItem, openCount, renderPlan, type Plan } from "./store.ts";
+import { nextOpenItem, openCount, renderTaskList, type TaskList } from "./store.ts";
 
 /** The pi customType used for nudge messages (matches the renderer). */
 export const NUDGE_CUSTOM_TYPE = "tasks-nudge";
@@ -29,24 +29,24 @@ export const MAX_CONSECUTIVE_NUDGES = 5;
 
 /** What should happen when the agent settles with open tasks. */
 export type NudgeDecision =
-	| { action: "nudge"; message: ReturnType<typeof formatNudgeMessage> }
-	| { action: "escalate"; open: number; goal: string }
+	| { action: "nudge"; text: string }
+	| { action: "escalate"; open: number }
 	| { action: "none" };
 
 /**
- * Short block appended to the system prompt while a plan is active. Kept
+ * Short block appended to the system prompt while tasks are open. Kept
  * small (a few lines) so the per-turn token cost stays negligible.
  */
-export function buildPlanAppendix(plan: Plan): string {
-	const open = openCount(plan);
-	const next = nextOpenItem(plan);
+export function buildPlanAppendix(list: TaskList): string {
+	const open = openCount(list);
+	const next = nextOpenItem(list);
 	const lines = [
-		"[tasks] You have an active goal + todo plan for this project.",
-		`[tasks] Goal: ${plan.goal} (${open} open item${open === 1 ? "" : "s"})`,
+		"[tasks] You have an active todo list for this session.",
+		`[tasks] ${open} task${open === 1 ? "" : "s"} still open.`,
 	];
 	if (next) lines.push(`[tasks] Current: "${next.item.text}" (${next.phase})`);
 	lines.push(
-		"[tasks] Keep it updated as you work: tasks op=done / start / drop / block / append. Call tasks op=view to see the full plan. You will be nudged if you stop with open items.",
+		"[tasks] Keep it updated as you work: tasks op=done / start / drop / block / append. Call tasks op=view to see the full list. You will be nudged if you stop with open items.",
 	);
 	return lines.join("\n");
 }
@@ -72,20 +72,20 @@ export function newNudgeState(cooldownMs = 60_000): NudgeState {
  * decision): when the open count drops below the low-water mark, real progress
  * happened — reset the consecutive-nudge counter and re-arm.
  */
-export function recordProgress(state: NudgeState, plan: Plan | null): void {
-	if (!plan) {
+export function recordProgress(state: NudgeState, list: TaskList | null): void {
+	if (!list) {
 		state.consecutive = 0;
 		state.lowWater = Number.POSITIVE_INFINITY;
 		return;
 	}
-	const open = openCount(plan);
+	const open = openCount(list);
 	if (open < state.lowWater) {
 		state.lowWater = open;
 		state.consecutive = 0;
 	}
 }
 
-/** Reset all nudge state (e.g. after a plan is cleared). */
+/** Reset all nudge state (e.g. after the list is cleared). */
 export function resetNudgeState(state: NudgeState): void {
 	state.lastNudgeAt = 0;
 	state.agentActedSinceNudge = true;
@@ -101,25 +101,25 @@ export function resetNudgeState(state: NudgeState): void {
  *   - and we have not exhausted MAX_CONSECUTIVE_NUDGES without progress.
  * When exhausted: escalate to the user (once — `none` on every settle after).
  */
-export function evaluateNudge(state: NudgeState, plan: Plan | null, now: number): NudgeDecision {
-	if (!plan) return { action: "none" };
-	const open = openCount(plan);
+export function evaluateNudge(state: NudgeState, list: TaskList | null, now: number): NudgeDecision {
+	if (!list) return { action: "none" };
+	const open = openCount(list);
 	if (open === 0) return { action: "none" };
 	if (state.consecutive >= MAX_CONSECUTIVE_NUDGES) {
-		return state.consecutive === MAX_CONSECUTIVE_NUDGES ? { action: "escalate", open, goal: plan.goal } : { action: "none" };
+		return state.consecutive === MAX_CONSECUTIVE_NUDGES ? { action: "escalate", open } : { action: "none" };
 	}
 	if (!state.agentActedSinceNudge) return { action: "none" };
 	// Never nudged yet → nudge regardless of cooldown.
 	if (state.lastNudgeAt !== 0 && now - state.lastNudgeAt < state.cooldownMs) return { action: "none" };
-	return { action: "nudge", message: formatNudgeMessage(plan) };
+	return { action: "nudge", text: formatNudgeText(list) };
 }
 
 /**
  * Back-compat boolean form of evaluateNudge for callers that only need the
  * nudge/no-nudge answer (escalation is handled by the caller).
  */
-export function shouldNudge(state: NudgeState, plan: Plan | null, now: number): boolean {
-	return evaluateNudge(state, plan, now).action === "nudge";
+export function shouldNudge(state: NudgeState, list: TaskList | null, now: number): boolean {
+	return evaluateNudge(state, list, now).action === "nudge";
 }
 
 /** Record that the agent produced a turn (resets the "needs agent action" gate). */
@@ -145,37 +145,36 @@ export function recordEscalation(state: NudgeState): void {
  * the strongest signal available: it enters the conversation exactly like the
  * human typing it, so even a weak model treats it as instruction, not noise.
  */
-export function formatNudgeText(plan: Plan): string {
-	const open = openCount(plan);
-	const next = nextOpenItem(plan);
+export function formatNudgeText(list: TaskList): string {
+	const open = openCount(list);
+	const next = nextOpenItem(list);
 	return [
-		`[tasks] You stopped your turn, but the work is NOT complete: ${open} task${open === 1 ? "" : "s"} still open and the goal is not done.`,
-		`Goal: ${plan.goal}`,
+		`[tasks] You stopped your turn, but your todo list still has ${open} open task${open === 1 ? "" : "s"} — the work is NOT complete.`,
 		next ? `Current task: "${next.item.text}" (${next.phase})` : "",
-		"Keep working on the plan now. Do not stop until every item is closed (tasks op=done/drop/block) or the goal is achieved. Do not reply to this message — just continue the work.",
+		"Keep working through the list now. Do not stop until every item is closed (tasks op=done/drop/block). Do not reply to this message — just continue the work.",
 		"",
-		renderPlan(plan),
+		renderTaskList(list),
 	]
 		.filter(Boolean)
 		.join("\n");
 }
 
 /**
- * Legacy/custom-renderer payload (kept for the tasks-nudge renderer used in
- * contexts that cannot take user messages).
+ * Custom-renderer payload (for the tasks-nudge renderer used in contexts
+ * that cannot take user messages).
  */
-export function formatNudgeMessage(plan: Plan): {
+export function formatNudgeMessage(list: TaskList): {
 	customType: string;
 	content: string;
 	display: boolean;
-	details: { open: number; goal: string; next: string };
+	details: { open: number; next: string };
 } {
-	const open = openCount(plan);
-	const next = nextOpenItem(plan);
+	const open = openCount(list);
+	const next = nextOpenItem(list);
 	return {
 		customType: NUDGE_CUSTOM_TYPE,
-		content: formatNudgeText(plan),
+		content: formatNudgeText(list),
 		display: true,
-		details: { open, goal: plan.goal, next: next?.item.text ?? "" },
+		details: { open, next: next?.item.text ?? "" },
 	};
 }

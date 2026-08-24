@@ -86,7 +86,7 @@ describe("extension factory surface", () => {
 		const tool = fake.tools[0]!;
 		expect(tool.name).toBe("tasks");
 		expect(tool.label).toBe("Tasks");
-		expect(tool.promptSnippet).toContain("init a plan");
+		expect(tool.promptSnippet).toContain("init it when starting");
 		expect(tool.promptGuidelines?.join(" ")).toContain("nudged");
 	});
 
@@ -108,9 +108,9 @@ describe("nudge flow (agent_settled fired)", () => {
 		return { cwd, hasUI: false, mode: "json", ui: {} as never };
 	}
 
-	async function initPlanFor(fake: ReturnType<typeof makeFakePi>, cwd: string): Promise<void> {
+	async function initListFor(fake: ReturnType<typeof makeFakePi>, cwd: string): Promise<void> {
 		const tool = fake.tools[0]!;
-		await tool.execute("call-1", { op: "init", goal: "Ship it", todos: ["a", "b"] }, undefined, undefined, makeToolCtx(cwd));
+		await tool.execute("call-1", { op: "init", todos: ["a", "b"] }, undefined, undefined, makeToolCtx(cwd));
 		fake.sent.length = 0;
 	}
 
@@ -119,7 +119,7 @@ describe("nudge flow (agent_settled fired)", () => {
 		makeTasks(fake.pi);
 		const cwd = path.join(tmp, "proj-a");
 		fs.mkdirSync(cwd, { recursive: true });
-		await initPlanFor(fake, cwd);
+		await initListFor(fake, cwd);
 		// Simulate an assistant turn so the "agent acted" gate is armed.
 		fake.fire("message_end", { message: { role: "assistant", content: "working…" } });
 		fake.fire("agent_settled", {}, { cwd });
@@ -127,8 +127,7 @@ describe("nudge flow (agent_settled fired)", () => {
 		const text = fake.sent[0] as string;
 		expect(typeof text).toBe("string");
 		expect(text).toContain("NOT complete");
-		expect(text).toContain("2 task"); // open count
-		expect(text).toContain("Ship it"); // goal
+		expect(text).toContain("2 open task"); // open count
 	});
 
 	test("model answering then stopping again re-nudges after cooldown", async () => {
@@ -136,7 +135,7 @@ describe("nudge flow (agent_settled fired)", () => {
 		makeTasks(fake.pi);
 		const cwd = path.join(tmp, "proj-a2");
 		fs.mkdirSync(cwd, { recursive: true });
-		await initPlanFor(fake, cwd);
+		await initListFor(fake, cwd);
 		fake.fire("message_end", { message: { role: "assistant", content: "working…" } });
 		fake.fire("agent_settled", {}, { cwd });
 		expect(fake.sent).toHaveLength(1);
@@ -152,7 +151,7 @@ describe("nudge flow (agent_settled fired)", () => {
 		const cwd = path.join(tmp, "proj-b");
 		fs.mkdirSync(cwd, { recursive: true });
 		const tool = fake.tools[0]!;
-		await tool.execute("c1", { op: "init", goal: "Ship it", todos: ["a"] }, undefined, undefined, makeToolCtx(cwd));
+		await tool.execute("c1", { op: "init", todos: ["a"] }, undefined, undefined, makeToolCtx(cwd));
 		await tool.execute("c2", { op: "done", task: "a" }, undefined, undefined, makeToolCtx(cwd));
 		fake.fire("message_end", { message: { role: "assistant", content: "done!" } });
 		fake.fire("agent_settled", {}, { cwd });
@@ -167,7 +166,7 @@ describe("nudge flow (agent_settled fired)", () => {
 		const tool = fake.tools[0]!;
 		const res = (await tool.execute(
 			"c1",
-			{ op: "init", goal: "Ship it", todos: ["a", "b"] },
+			{ op: "init", todos: ["a", "b"] },
 			undefined,
 			undefined,
 			makeToolCtx(cwd),
@@ -183,9 +182,9 @@ describe("nudge flow (agent_settled fired)", () => {
 		const cwd = path.join(tmp, "proj-d");
 		fs.mkdirSync(cwd, { recursive: true });
 		const tool = fake.tools[0]!;
-		await tool.execute("c1", { op: "init", goal: "First", todos: ["a"] }, undefined, undefined, makeToolCtx(cwd));
+		await tool.execute("c1", { op: "init", todos: ["a"] }, undefined, undefined, makeToolCtx(cwd));
 		await expect(
-			tool.execute("c2", { op: "init", goal: "Second", todos: ["b"] }, undefined, undefined, makeToolCtx(cwd)),
+			tool.execute("c2", { op: "init", todos: ["b"] }, undefined, undefined, makeToolCtx(cwd)),
 		).rejects.toThrow("replace=true");
 	});
 });

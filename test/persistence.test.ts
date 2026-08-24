@@ -10,7 +10,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { clearPlan, loadPlan, planFile, planKey, projectKey, savePlan } from "../src/persistence.ts";
-import { initPlan, markDone } from "../src/store.ts";
+import { initList, markDone } from "../src/store.ts";
 
 let tmp: string;
 
@@ -31,30 +31,30 @@ describe("persistence", () => {
 
 	test("save + load round-trips a plan by key", () => {
 		const key = planKey("sess-1", "/home/u/repo");
-		const p = initPlan({ goal: "g", project: key, todos: ["a", "b"], now: 1 });
+		const p = initList({ project: key, todos: ["a", "b"], now: 1 });
 		markDone(p, "a", 2);
 		savePlan(tmp, p);
 		const loaded = loadPlan(tmp, key);
-		expect(loaded?.goal).toBe("g");
+		expect(loaded?.phases[0]?.items[0]?.text).toBe("a");
 		expect(loaded?.phases[0]?.items[0]?.status).toBe("done");
 		// Round-trip survives a "restart" (same session id → same key).
-		expect(loadPlan(tmp, planKey("sess-1", "/home/u/repo"))?.goal).toBe("g");
+		expect(loadPlan(tmp, planKey("sess-1", "/home/u/repo"))?.key).toBe(key);
 	});
 
-	test("different sessions get different plans (no leakage)", () => {
+	test("different sessions get different lists (no leakage)", () => {
 		const k1 = planKey("session-one", "/repo");
 		const k2 = planKey("session-two", "/repo");
 		expect(k1).not.toBe(k2);
-		savePlan(tmp, initPlan({ goal: "first", project: k1, todos: ["a"], now: 1 }));
-		savePlan(tmp, initPlan({ goal: "second", project: k2, todos: ["b"], now: 1 }));
-		expect(loadPlan(tmp, k1)?.goal).toBe("first");
-		expect(loadPlan(tmp, k2)?.goal).toBe("second");
+		savePlan(tmp, initList({ project: k1, todos: ["a"], now: 1 }));
+		savePlan(tmp, initList({ project: k2, todos: ["b"], now: 1 }));
+		expect(loadPlan(tmp, k1)?.key).toBe(k1);
+		expect(loadPlan(tmp, k2)?.key).toBe(k2);
 	});
 
 	test("missing plan loads as null; clear removes it", () => {
 		const key = planKey("nope-session", "/x");
 		expect(loadPlan(tmp, key)).toBeNull();
-		const p = initPlan({ goal: "g", project: key, todos: ["a"], now: 1 });
+		const p = initList({ project: key, todos: ["a"], now: 1 });
 		savePlan(tmp, p);
 		expect(clearPlan(tmp, key)).toBe(true);
 		expect(loadPlan(tmp, key)).toBeNull();
@@ -77,13 +77,13 @@ describe("persistence", () => {
 		expect(loadPlan(tmp, planKey("corrupt-sess", "/corrupt/repo"))).toBeNull();
 		fs.writeFileSync(
 			file,
-			JSON.stringify({ goal: "g", phases: [{ name: "P", items: [{ text: "t", status: "bogus" }] }], createdAt: 1, updatedAt: 1, project: "x" }),
+			JSON.stringify({ phases: [{ name: "P", items: [{ text: "t", status: "bogus" }] }], createdAt: 1, updatedAt: 1, project: "x" }),
 		);
 		expect(loadPlan(tmp, planKey("corrupt-sess", "/corrupt/repo"))).toBeNull();
 		fs.writeFileSync(
 			file,
-			JSON.stringify({ goal: "g", phases: [{ name: "P", items: [{ text: "t", status: "pending" }] }], createdAt: 1, updatedAt: 1, project: "x" }),
+			JSON.stringify({ phases: [{ name: "P", items: [{ text: "t", status: "pending" }] }], createdAt: 1, updatedAt: 1, key: "k" }),
 		);
-		expect(loadPlan(tmp, planKey("corrupt-sess", "/corrupt/repo"))?.goal).toBe("g");
+		expect(loadPlan(tmp, planKey("corrupt-sess", "/corrupt/repo"))?.phases[0]?.items[0]?.text).toBe("t");
 	});
 });

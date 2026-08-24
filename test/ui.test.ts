@@ -4,8 +4,8 @@
 
 import { describe, expect, test } from "bun:test";
 
-import { initPlan } from "../src/store.ts";
-import { itemLine, planStats, progressBar, renderPlanThemed, statusLine } from "../src/ui.ts";
+import { initList } from "../src/store.ts";
+import { itemLine, planStats, progressBar, renderPlanThemed } from "../src/ui.ts";
 
 /** Theme stand-in that strips colors — assertions check structure only. */
 const theme = {
@@ -13,22 +13,15 @@ const theme = {
 	bold: (t: string) => t,
 };
 
-const plan = () => initPlan({ goal: "Ship", project: "p", todos: ["a", "b"], now: 0 });
+const plan = () => initList({ project: "p", todos: ["a", "b"], now: 0 });
 
-describe("planStats + statusLine", () => {
+describe("planStats", () => {
 	test("computes done/total/open/current", () => {
 		const s = planStats(plan());
 		expect(s.total).toBe(2);
 		expect(s.open).toBe(2);
 		expect(s.done).toBe(0);
 		expect(s.current).toBe("a");
-	});
-
-	test("statusLine joins goal, progress and current item", () => {
-		const line = statusLine(plan());
-		expect(line).toContain("Ship");
-		expect(line).toContain("0/2");
-		expect(line).toContain("▸ a");
 	});
 });
 
@@ -50,10 +43,9 @@ describe("progressBar", () => {
 });
 
 describe("renderPlanThemed", () => {
-	test("renders goal header, progress line and items", () => {
+	test("renders progress line and items", () => {
 		const lines = renderPlanThemed(plan(), theme);
-		expect(lines[0]).toContain("Ship");
-		expect(lines.join("\n")).toContain("0/2 · 2 open");
+		expect(lines[0]).toContain("0/2 · 2 open");
 		expect(lines.join("\n")).toContain("a");
 	});
 });

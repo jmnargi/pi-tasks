@@ -7,7 +7,7 @@
  *
  * FLICKER NOTE: render() must never touch the filesystem or recompute
  * anything expensive — pi calls it on every streaming delta (up to ~60fps)
- * and its differential renderer repaints whatever changed. The plan is read
+ * and its differential renderer repaints whatever changed. The list is read
  * once at construction and cached; mutations update the cache in place and
  * persist to disk from the input handler (never inside render()).
  *
@@ -23,13 +23,13 @@
 import { Key, matchesKey, truncateToWidth, type Component, type TUI } from "@earendil-works/pi-tui";
 
 import { loadPlan, savePlan } from "./persistence.ts";
-import { markBlocked, markDone, markStarted, type Plan } from "./store.ts";
+import { markBlocked, markDone, markStarted, type TaskList } from "./store.ts";
 import { planStats, progressBar, itemLine, statusToken, type ThemeLike } from "./ui.ts";
 
 export interface DashboardDeps {
 	/** Data dir for load/save. */
 	dataDir: string;
-	/** Storage key of the plan shown (session-scoped). */
+	/** Storage key of the list shown (session-scoped). */
 	planKey: string;
 }
 
@@ -40,9 +40,9 @@ interface Row {
 	status: string;
 }
 
-function rowsOf(plan: Plan): Row[] {
+function rowsOf(list: TaskList): Row[] {
 	const rows: Row[] = [];
-	for (const phase of plan.phases) {
+	for (const phase of list.phases) {
 		for (const item of phase.items) rows.push({ phase: phase.name, text: item.text, status: item.status });
 	}
 	return rows;
@@ -55,7 +55,7 @@ export function makeDashboardComponent(
 	done: () => void,
 ): Component & { dispose(): void } {
 	// Cached state — render() only reads these.
-	let plan: Plan | null = loadPlan(deps.dataDir, deps.planKey);
+	let list: TaskList | null = loadPlan(deps.dataDir, deps.planKey);
 	let selected = 0;
 	let notice = "";
 	let inputMode: null | { buffer: string } = null;
@@ -69,24 +69,24 @@ export function makeDashboardComponent(
 	};
 
 	const clampSelected = (): void => {
-		const n = plan ? rowsOf(plan).length : 0;
+		const n = list ? rowsOf(list).length : 0;
 		if (selected >= n) selected = Math.max(0, n - 1);
 	};
 
 	const selectedRow = (): Row | null => {
-		if (!plan) return null;
-		return rowsOf(plan)[selected] ?? null;
+		if (!list) return null;
+		return rowsOf(list)[selected] ?? null;
 	};
 
-	const mutate = (fn: (p: Plan) => { ok: true } | { ok: false; error: string }): void => {
-		if (!plan) return;
-		const r = fn(plan);
+	const mutate = (fn:  (p: TaskList) => { ok: true } | { ok: false; error: string }): void => {
+		if (!list) return;
+		const r = fn(list);
 		if (r.ok) {
 			try {
-				savePlan(deps.dataDir, plan);
+				savePlan(deps.dataDir, list);
 				notice = "";
 			} catch {
-				notice = "failed to save plan";
+				notice = "failed to save list";
 			}
 			clampSelected();
 		} else {
@@ -105,9 +105,9 @@ export function makeDashboardComponent(
 				),
 			];
 		}
-		if (!plan) {
+		if (!list) {
 			return [
-				truncateToWidth(`${theme.fg("accent", theme.bold("tasks"))} ${theme.fg("dim", "no plan for this session")}`, width),
+				truncateToWidth(`${theme.fg("accent", theme.bold("tasks"))} ${theme.fg("dim", "no tasks for this session")}`, width),
 				"",
 				theme.fg("dim", "ask the model to create one: tasks op=init …"),
 				"",
@@ -116,13 +116,12 @@ export function makeDashboardComponent(
 		}
 
 		const out: string[] = [];
-		const s = planStats(plan);
-		out.push(truncateToWidth(theme.fg("accent", theme.bold(`◈ ${plan.goal}`)), width));
+		const s = planStats(list);
 		out.push(truncateToWidth(theme.fg("muted", `${progressBar(s.done, s.total)} ${s.done}/${s.total} · ${s.open} open`), width));
 
-		const rows = rowsOf(plan);
+		const rows = rowsOf(list);
 		let rowIndex = 0;
-		for (const phase of plan.phases) {
+		for (const phase of list.phases) {
 			if (phase.items.length === 0) continue;
 			out.push("");
 			out.push(truncateToWidth(theme.fg("dim", theme.bold(phase.name.toUpperCase())), width));
@@ -182,8 +181,8 @@ export function makeDashboardComponent(
 				selected++;
 				clampSelected();
 			} else if (data === "r" || data === "R") {
-				// Explicit reload from disk (the model may have updated the plan).
-				plan = loadPlan(deps.dataDir, deps.planKey);
+				// Explicit reload from disk (the model may have updated the list).
+							list = loadPlan(deps.dataDir, deps.planKey);
 				clampSelected();
 			} else if (matchesKey(data, Key.enter)) {
 				const t = selectedRow();

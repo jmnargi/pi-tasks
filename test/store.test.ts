@@ -1,37 +1,36 @@
 /**
- * Tests for the goal+todo state machine (src/store.ts).
+ * Tests for the todo-list state machine (src/store.ts).
  */
 
 import { describe, expect, test } from "bun:test";
 
 import {
 	appendTasks,
-	initPlan,
+	initList,
 	markBlocked,
 	markDone,
 	markDropped,
 	markStarted,
 	nextOpenItem,
 	openCount,
-	renderPlan,
+	renderTaskList,
 	unblock,
 } from "../src/store.ts";
 
 const now = 1000;
 
 function plan() {
-	return initPlan({
-		goal: "Ship the API",
+	return initList({
 		project: "proj",
 		todos: ["write endpoint", "write tests", "update docs"],
 		now,
 	});
 }
 
-describe("initPlan", () => {
+describe("initList", () => {
 	test("creates a single phase with the first item in_progress", () => {
 		const p = plan();
-		expect(p.goal).toBe("Ship the API");
+		expect(p.key).toBe("proj");
 		expect(p.phases).toHaveLength(1);
 		expect(p.phases[0]!.items.map((i) => i.text)).toEqual(["write endpoint", "write tests", "update docs"]);
 		expect(p.phases[0]!.items[0]!.status).toBe("in_progress");
@@ -39,9 +38,8 @@ describe("initPlan", () => {
 	});
 
 	test("supports phase-grouped checklists", () => {
-		const p = initPlan({
-			goal: "g",
-			project: "p",
+		const p = initList({
+						project: "p",
 			phases: [
 				{ name: "Build", items: ["a", "b"] },
 				{ name: "Verify", items: ["c"] },
@@ -53,21 +51,20 @@ describe("initPlan", () => {
 	});
 
 	test("empty todos create an empty plan", () => {
-		const p = initPlan({ goal: "g", project: "p", now });
+		const p = initList({ project: "p", now });
 		expect(openCount(p)).toBe(0);
 	});
 });
 
 describe("duplicate text guards", () => {
-	test("initPlan rejects duplicate item texts", () => {
-		expect(() => initPlan({ goal: "g", project: "p", todos: ["a", "a"], now })).toThrow("duplicate task text");
+	test("initList rejects duplicate item texts", () => {
+		expect(() => initList({ project: "p", todos: ["a", "a"], now })).toThrow("duplicate task text");
 	});
 
-	test("initPlan rejects duplicates across phases", () => {
+	test("initList rejects duplicates across phases", () => {
 		expect(() =>
-			initPlan({
-				goal: "g",
-				project: "p",
+			initList({
+								project: "p",
 				phases: [
 					{ name: "A", items: ["x"] },
 					{ name: "B", items: ["x"] },
@@ -77,11 +74,11 @@ describe("duplicate text guards", () => {
 		).toThrow("duplicate task text");
 	});
 
-	test("appendTasks rejects texts already in the plan", () => {
+	test("appendTasks rejects texts already in the list", () => {
 		const p = plan();
 		const r = appendTasks(p, ["write tests"], undefined, now);
 		expect(r.ok).toBe(false);
-		if (!r.ok) expect(r.error).toContain("already in the plan");
+		if (!r.ok) expect(r.error).toContain("already in the list");
 	});
 });
 
@@ -170,7 +167,7 @@ describe("markDropped / markBlocked / unblock", () => {
 
 describe("appendTasks", () => {
 	test("appends to the first phase and auto-promotes when nothing is open", () => {
-		const p = initPlan({ goal: "g", project: "p", now });
+		const p = initList({ project: "p", now });
 		const r = appendTasks(p, ["one"], undefined, now);
 		expect(r.ok).toBe(true);
 		if (!r.ok) throw new Error(r.error);
@@ -178,10 +175,9 @@ describe("appendTasks", () => {
 	});
 });
 
-describe("renderPlan + nextOpenItem", () => {
-	test("renderPlan includes goal, markers and counts", () => {
-		const text = renderPlan(plan());
-		expect(text).toContain("Goal: Ship the API");
+describe("renderTaskList + nextOpenItem", () => {
+	test("renderTaskList includes markers and counts", () => {
+		const text = renderTaskList(plan());
 		expect(text).toContain("[~] write endpoint");
 		expect(text).toContain("[ ] write tests");
 		expect(text).toContain("3 open · 3 total");

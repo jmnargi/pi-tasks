@@ -1,11 +1,11 @@
 /**
- * src/persistence.ts — plan persistence to the pi agent data dir.
+ * src/persistence.ts — todo-list persistence to the pi agent data dir.
  *
- * Plans are scoped to a SESSION (not the project): each session gets its own
- * plan file keyed by the pi session id, stored under
+ * Lists are scoped to a SESSION (not the project): each session gets its own
+ * file keyed by the pi session id, stored under
  * `<agentDir>/tasks/sessions/<safe-key>.json`. The session id is stable —
  * pi reads it back from the session header when a session is resumed — so a
- * plan survives CLI restarts exactly as long as the session does, and
+ * list survives CLI restarts exactly as long as the session does, and
  * switching sessions never shows another session's tasks.
  *
  * Pure IO with no pi imports; callers supply the data dir and the key.
@@ -14,7 +14,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import type { Plan } from "./store.ts";
+import type { TaskList } from "./store.ts";
 
 const VALID_STATUSES: readonly string[] = ["pending", "in_progress", "done", "dropped", "blocked"];
 
@@ -27,7 +27,7 @@ function safeFragment(s: string): string {
 }
 
 /**
- * Storage key for a plan. Prefers the pi session id (stable across restarts,
+ * Storage key for a list. Prefers the pi session id (stable across restarts,
  * unique per session); falls back to the project path when no session manager
  * is available (tests, headless embeds).
  */
@@ -46,48 +46,47 @@ export function plansDir(dataDir: string): string {
 	return path.join(dataDir, "tasks", "sessions");
 }
 
-/** File path for a plan key. */
+/** File path for a storage key. */
 export function planFile(dataDir: string, key: string): string {
 	return path.join(plansDir(dataDir), `${key}.json`);
 }
 
-/** Structural validation for a loaded plan — a truncated/corrupt file must
- *  degrade to "no plan" rather than crash every later operation. */
-function isValidPlan(p: unknown): p is Plan {
+/** Structural validation for a loaded list — a truncated/corrupt file must
+ *  degrade to "no tasks" rather than crash every later operation. */
+function isValidList(p: unknown): p is TaskList {
 	if (typeof p !== "object" || p === null) return false;
-	const plan = p as Plan;
-	if (typeof plan.goal !== "string") return false;
-	if (!Array.isArray(plan.phases)) return false;
-	for (const phase of plan.phases) {
+	const list = p as TaskList;
+	if (!Array.isArray(list.phases)) return false;
+	for (const phase of list.phases) {
 		if (typeof phase !== "object" || phase === null || typeof phase.name !== "string" || !Array.isArray(phase.items)) return false;
 		for (const item of phase.items) {
 			if (typeof item !== "object" || item === null || typeof item.text !== "string") return false;
 			if (!VALID_STATUSES.includes(item.status)) return false;
 		}
 	}
-	return typeof plan.createdAt === "number" && typeof plan.updatedAt === "number" && typeof plan.project === "string";
+	return typeof list.createdAt === "number" && typeof list.updatedAt === "number" && typeof list.key === "string";
 }
 
-/** Load a plan for `key`, or null when none exists (or the file is corrupt). */
-export function loadPlan(dataDir: string, key: string): Plan | null {
+/** Load a list for `key`, or null when none exists (or the file is corrupt). */
+export function loadPlan(dataDir: string, key: string): TaskList | null {
 	try {
 		const parsed: unknown = JSON.parse(fs.readFileSync(planFile(dataDir, key), "utf8"));
-		return isValidPlan(parsed) ? parsed : null;
+		return isValidList(parsed) ? parsed : null;
 	} catch {
 		return null;
 	}
 }
 
-/** Persist a plan (atomic write via temp + rename). */
-export function savePlan(dataDir: string, plan: Plan): void {
-	const file = planFile(dataDir, plan.project);
+/** Persist a list (atomic write via temp + rename). */
+export function savePlan(dataDir: string, list: TaskList): void {
+	const file = planFile(dataDir, list.key);
 	fs.mkdirSync(path.dirname(file), { recursive: true });
 	const tmp = `${file}.tmp`;
-	fs.writeFileSync(tmp, JSON.stringify(plan, null, 2) + "\n");
+	fs.writeFileSync(tmp, JSON.stringify(list, null, 2) + "\n");
 	fs.renameSync(tmp, file);
 }
 
-/** Delete a plan (returns true when one existed). */
+/** Delete a list (returns true when one existed). */
 export function clearPlan(dataDir: string, key: string): boolean {
 	const file = planFile(dataDir, key);
 	if (!fs.existsSync(file)) return false;
